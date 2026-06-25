@@ -12,7 +12,7 @@ export async function apiRequest<T>(path: string, init?: RequestInit): Promise<T
     let detail = response.statusText;
     try {
       const payload = await response.json();
-      detail = payload.detail ?? detail;
+      detail = formatApiErrorDetail(payload.detail ?? payload.message ?? detail);
     } catch {
       // Keep the HTTP status text.
     }
@@ -22,4 +22,34 @@ export async function apiRequest<T>(path: string, init?: RequestInit): Promise<T
     return undefined as T;
   }
   return response.json() as Promise<T>;
+}
+
+function formatApiErrorDetail(detail: unknown): string {
+  if (typeof detail === 'string') {
+    return detail;
+  }
+
+  if (Array.isArray(detail)) {
+    return detail.map(formatValidationError).join('\n');
+  }
+
+  if (detail && typeof detail === 'object') {
+    return JSON.stringify(detail);
+  }
+
+  return String(detail);
+}
+
+function formatValidationError(error: unknown): string {
+  if (!error || typeof error !== 'object') {
+    return String(error);
+  }
+
+  const item = error as { loc?: unknown; msg?: unknown };
+  const location = Array.isArray(item.loc)
+    ? item.loc.filter((part) => part !== 'body').join('.')
+    : '';
+  const message = typeof item.msg === 'string' ? item.msg : JSON.stringify(error);
+
+  return location ? `${location}: ${message}` : message;
 }

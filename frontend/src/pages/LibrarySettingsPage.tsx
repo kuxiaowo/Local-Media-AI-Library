@@ -1,7 +1,7 @@
 import { FormEvent, useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useSearchParams } from 'react-router-dom';
-import { FolderPlus, Play, RefreshCw, Save, Trash2 } from 'lucide-react';
+import { FolderOpen, FolderPlus, Play, RefreshCw, Save, Trash2 } from 'lucide-react';
 import {
   createDirectoryRule,
   deleteDirectoryRule,
@@ -10,10 +10,21 @@ import {
 } from '../api/directoryRules';
 import { getOllamaModels } from '../api/models';
 import { startScan } from '../api/scan';
-import { getDefaultAnalysisPrompt } from '../api/settings';
+import {
+  browseDirectory,
+  getDefaultAnalysisPrompt,
+  getDefaultBackgroundContextPrompt,
+  getDefaultVideoFinalSummaryPrompt,
+  getDefaultVideoSegmentPrompt,
+} from '../api/settings';
 import type { DirectoryRule, DirectoryRulePayload, ScanMode } from '../types';
 
-function createDefaultPayload(defaultAnalysisPrompt = ''): DirectoryRulePayload {
+function createDefaultPayload(
+  defaultAnalysisPrompt = '',
+  defaultBackgroundContextPrompt = '',
+  defaultVideoSegmentPrompt = '',
+  defaultVideoFinalSummaryPrompt = '',
+): DirectoryRulePayload {
   return {
     path: '',
     recursive: true,
@@ -21,9 +32,15 @@ function createDefaultPayload(defaultAnalysisPrompt = ''): DirectoryRulePayload 
     summary_model: 'qwen3:8b',
     custom_analysis_prompt: defaultAnalysisPrompt,
     background_context: '',
+    background_context_prompt: defaultBackgroundContextPrompt,
+    video_segment_prompt: defaultVideoSegmentPrompt,
+    video_final_summary_prompt: defaultVideoFinalSummaryPrompt,
     video_frame_strategy: 'hybrid',
     frame_interval_seconds: 5,
     max_frames_per_video: 12,
+    video_frame_max_width: 1280,
+    video_frame_max_height: null,
+    video_batch_size: 6,
     analysis_detail: 'normal',
     enabled: true,
   };
@@ -41,8 +58,23 @@ export function LibrarySettingsPage() {
     queryKey: ['default-analysis-prompt'],
     queryFn: getDefaultAnalysisPrompt,
   });
+  const defaultBackgroundPromptQuery = useQuery({
+    queryKey: ['default-background-context-prompt'],
+    queryFn: getDefaultBackgroundContextPrompt,
+  });
+  const defaultVideoSegmentPromptQuery = useQuery({
+    queryKey: ['default-video-segment-prompt'],
+    queryFn: getDefaultVideoSegmentPrompt,
+  });
+  const defaultVideoFinalPromptQuery = useQuery({
+    queryKey: ['default-video-final-summary-prompt'],
+    queryFn: getDefaultVideoFinalSummaryPrompt,
+  });
   const modelOptions = modelsQuery.data?.models ?? [];
   const defaultAnalysisPrompt = defaultPromptQuery.data?.prompt ?? '';
+  const defaultBackgroundContextPrompt = defaultBackgroundPromptQuery.data?.prompt ?? '';
+  const defaultVideoSegmentPrompt = defaultVideoSegmentPromptQuery.data?.prompt ?? '';
+  const defaultVideoFinalSummaryPrompt = defaultVideoFinalPromptQuery.data?.prompt ?? '';
   const requestedPath = searchParams.get('path');
   const requestedNormalizedPath = searchParams.get('normalized_path');
   const settingsTargetKey = `${requestedNormalizedPath ?? ''}|${requestedPath ?? ''}`;
@@ -65,13 +97,28 @@ export function LibrarySettingsPage() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['directory-rules'] });
       setSelectedId(null);
-      setForm(createDefaultPayload(defaultAnalysisPrompt));
+      setForm(
+        createDefaultPayload(
+          defaultAnalysisPrompt,
+          defaultBackgroundContextPrompt,
+          defaultVideoSegmentPrompt,
+          defaultVideoFinalSummaryPrompt,
+        ),
+      );
     },
   });
 
   const scanMutation = useMutation({
     mutationFn: ({ id, mode }: { id: string; mode: ScanMode }) =>
       startScan({ directoryRuleId: id, mode }),
+  });
+  const browseMutation = useMutation({
+    mutationFn: () => browseDirectory(form.path),
+    onSuccess: (data) => {
+      if (data.path) {
+        setForm((current) => ({ ...current, path: data.path! }));
+      }
+    },
   });
 
   function selectRule(rule: DirectoryRule) {
@@ -83,9 +130,15 @@ export function LibrarySettingsPage() {
       summary_model: rule.summary_model,
       custom_analysis_prompt: rule.custom_analysis_prompt?.trim() || defaultAnalysisPrompt,
       background_context: rule.background_context ?? '',
+      background_context_prompt: rule.background_context_prompt?.trim() || defaultBackgroundContextPrompt,
+      video_segment_prompt: rule.video_segment_prompt?.trim() || defaultVideoSegmentPrompt,
+      video_final_summary_prompt: rule.video_final_summary_prompt?.trim() || defaultVideoFinalSummaryPrompt,
       video_frame_strategy: rule.video_frame_strategy,
       frame_interval_seconds: rule.frame_interval_seconds,
       max_frames_per_video: rule.max_frames_per_video,
+      video_frame_max_width: rule.video_frame_max_width,
+      video_frame_max_height: rule.video_frame_max_height,
+      video_batch_size: rule.video_batch_size,
       analysis_detail: rule.analysis_detail,
       enabled: rule.enabled,
     });
@@ -107,12 +160,23 @@ export function LibrarySettingsPage() {
       selectRule(matchedRule);
     } else if (requestedPath) {
       setSelectedId(null);
-      setForm({ ...createDefaultPayload(defaultAnalysisPrompt), path: requestedPath });
+      setForm({
+        ...createDefaultPayload(
+          defaultAnalysisPrompt,
+          defaultBackgroundContextPrompt,
+          defaultVideoSegmentPrompt,
+          defaultVideoFinalSummaryPrompt,
+        ),
+        path: requestedPath,
+      });
     }
     setAppliedSettingsTarget(settingsTargetKey);
   }, [
     appliedSettingsTarget,
+    defaultBackgroundContextPrompt,
     defaultAnalysisPrompt,
+    defaultVideoFinalSummaryPrompt,
+    defaultVideoSegmentPrompt,
     requestedNormalizedPath,
     requestedPath,
     rulesQuery.data,
@@ -124,6 +188,24 @@ export function LibrarySettingsPage() {
       setForm((current) => ({ ...current, custom_analysis_prompt: defaultAnalysisPrompt }));
     }
   }, [defaultAnalysisPrompt, form.custom_analysis_prompt]);
+
+  useEffect(() => {
+    if (defaultBackgroundContextPrompt && !form.background_context_prompt?.trim()) {
+      setForm((current) => ({ ...current, background_context_prompt: defaultBackgroundContextPrompt }));
+    }
+  }, [defaultBackgroundContextPrompt, form.background_context_prompt]);
+
+  useEffect(() => {
+    if (defaultVideoSegmentPrompt && !form.video_segment_prompt?.trim()) {
+      setForm((current) => ({ ...current, video_segment_prompt: defaultVideoSegmentPrompt }));
+    }
+  }, [defaultVideoSegmentPrompt, form.video_segment_prompt]);
+
+  useEffect(() => {
+    if (defaultVideoFinalSummaryPrompt && !form.video_final_summary_prompt?.trim()) {
+      setForm((current) => ({ ...current, video_final_summary_prompt: defaultVideoFinalSummaryPrompt }));
+    }
+  }, [defaultVideoFinalSummaryPrompt, form.video_final_summary_prompt]);
 
   function submit(event: FormEvent) {
     event.preventDefault();
@@ -141,7 +223,14 @@ export function LibrarySettingsPage() {
           className="btn"
           onClick={() => {
             setSelectedId(null);
-            setForm(createDefaultPayload(defaultAnalysisPrompt));
+            setForm(
+              createDefaultPayload(
+                defaultAnalysisPrompt,
+                defaultBackgroundContextPrompt,
+                defaultVideoSegmentPrompt,
+                defaultVideoFinalSummaryPrompt,
+              ),
+            );
           }}
           title="新增目录规则"
         >
@@ -180,16 +269,31 @@ export function LibrarySettingsPage() {
 
         <form className="panel p-4" onSubmit={submit}>
           <div className="grid gap-4 lg:grid-cols-2">
-            <label className="lg:col-span-2">
-              <span className="mb-1 block text-sm font-medium">路径</span>
-              <input
-                className="control w-full"
-                value={form.path}
-                onChange={(event) => setForm({ ...form, path: event.target.value })}
-                placeholder="D:/Photos"
-                required
-              />
-            </label>
+            <div className="lg:col-span-2">
+              <label htmlFor="directory-path" className="mb-1 block text-sm font-medium">
+                路径
+              </label>
+              <div className="flex gap-2">
+                <input
+                  id="directory-path"
+                  className="control min-w-0 flex-1"
+                  value={form.path}
+                  onChange={(event) => setForm({ ...form, path: event.target.value })}
+                  placeholder="D:/Photos"
+                  required
+                />
+                <button
+                  className="btn shrink-0"
+                  type="button"
+                  onClick={() => browseMutation.mutate()}
+                  disabled={browseMutation.isPending}
+                  title="打开系统文件夹选择器"
+                >
+                  <FolderOpen className="h-4 w-4" />
+                  浏览
+                </button>
+              </div>
+            </div>
 
             <ModelSelector
               id="vision-model-options"
@@ -218,6 +322,35 @@ export function LibrarySettingsPage() {
                 用来告诉模型这个目录照片的大致拍摄背景、用途或命名习惯；画面可见内容仍优先。
               </p>
             </label>
+
+            <div className="lg:col-span-2">
+              <div className="mb-1 flex items-center justify-between gap-3">
+                <label htmlFor="background-context-prompt" className="block text-sm font-medium">
+                  背景使用规则
+                </label>
+                <button
+                  className="btn h-8"
+                  type="button"
+                  onClick={() =>
+                    setForm({ ...form, background_context_prompt: defaultBackgroundContextPrompt })
+                  }
+                  disabled={!defaultBackgroundContextPrompt}
+                  title="恢复为设置页中的默认背景使用规则"
+                >
+                  <RefreshCw className="h-4 w-4" />
+                  恢复默认
+                </button>
+              </div>
+              <textarea
+                id="background-context-prompt"
+                className="control min-h-28 w-full resize-y"
+                value={form.background_context_prompt ?? ''}
+                onChange={(event) => setForm({ ...form, background_context_prompt: event.target.value })}
+              />
+              <p className="mt-1 text-xs leading-5 text-slate-500">
+                只有“背景补充”非空时才会随媒体分析 prompt 一起发送；为空时这段规则不会进入提示词。
+              </p>
+            </div>
 
             <div className="lg:col-span-2">
               <div className="mb-1 flex items-center justify-between gap-3">
@@ -277,7 +410,30 @@ export function LibrarySettingsPage() {
             <NumberField
               label="最大帧数"
               value={form.max_frames_per_video}
+              max={200}
               onChange={(value) => setForm({ ...form, max_frames_per_video: value })}
+            />
+            <NumberField
+              label="关键帧最大宽度"
+              value={form.video_frame_max_width}
+              min={160}
+              max={4096}
+              onChange={(value) => setForm({ ...form, video_frame_max_width: value })}
+            />
+            <OptionalNumberField
+              label="关键帧高度"
+              value={form.video_frame_max_height}
+              min={160}
+              max={4096}
+              placeholder="留空保持比例"
+              onChange={(value) => setForm({ ...form, video_frame_max_height: value })}
+            />
+            <NumberField
+              label="每批帧数"
+              value={form.video_batch_size}
+              min={1}
+              max={24}
+              onChange={(value) => setForm({ ...form, video_batch_size: value })}
             />
             <label className="flex items-center gap-2 text-sm">
               <input
@@ -297,6 +453,64 @@ export function LibrarySettingsPage() {
             </label>
           </div>
 
+          <div className="mt-4 grid gap-4">
+            <div>
+              <div className="mb-1 flex items-center justify-between gap-3">
+                <label htmlFor="video-segment-prompt" className="block text-sm font-medium">
+                  视频分段识别提示词
+                </label>
+                <button
+                  className="btn h-8"
+                  type="button"
+                  onClick={() => setForm({ ...form, video_segment_prompt: defaultVideoSegmentPrompt })}
+                  disabled={!defaultVideoSegmentPrompt}
+                  title="恢复为设置页中的默认视频分段识别提示词"
+                >
+                  <RefreshCw className="h-4 w-4" />
+                  恢复默认
+                </button>
+              </div>
+              <textarea
+                id="video-segment-prompt"
+                className="control min-h-44 w-full resize-y font-mono text-xs leading-5"
+                value={form.video_segment_prompt ?? ''}
+                onChange={(event) => setForm({ ...form, video_segment_prompt: event.target.value })}
+              />
+              <p className="mt-1 text-xs leading-5 text-slate-500">
+                用于每批关键帧识别。系统会额外附加上一批 global summary、timeline、当前帧序号和时间戳，并强制 JSON 输出。
+              </p>
+            </div>
+
+            <div>
+              <div className="mb-1 flex items-center justify-between gap-3">
+                <label htmlFor="video-final-summary-prompt" className="block text-sm font-medium">
+                  视频最终总结提示词
+                </label>
+                <button
+                  className="btn h-8"
+                  type="button"
+                  onClick={() =>
+                    setForm({ ...form, video_final_summary_prompt: defaultVideoFinalSummaryPrompt })
+                  }
+                  disabled={!defaultVideoFinalSummaryPrompt}
+                  title="恢复为设置页中的默认视频最终总结提示词"
+                >
+                  <RefreshCw className="h-4 w-4" />
+                  恢复默认
+                </button>
+              </div>
+              <textarea
+                id="video-final-summary-prompt"
+                className="control min-h-44 w-full resize-y font-mono text-xs leading-5"
+                value={form.video_final_summary_prompt ?? ''}
+                onChange={(event) => setForm({ ...form, video_final_summary_prompt: event.target.value })}
+              />
+              <p className="mt-1 text-xs leading-5 text-slate-500">
+                用于汇总所有 segment summary，调用的是该目录的总结模型，不会再次投喂视频帧图片。
+              </p>
+            </div>
+          </div>
+
           {modelsQuery.error && (
             <div className="mt-4 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
               无法读取 Ollama 模型列表，仍可手动输入模型名：{modelsQuery.error.message}
@@ -307,9 +521,24 @@ export function LibrarySettingsPage() {
               无法读取默认提示词：{defaultPromptQuery.error.message}
             </div>
           )}
-          {(saveMutation.error || deleteMutation.error || scanMutation.error) && (
-            <div className="mt-4 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700">
-              {(saveMutation.error ?? deleteMutation.error ?? scanMutation.error)?.message}
+          {defaultBackgroundPromptQuery.error && (
+            <div className="mt-4 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+              无法读取默认背景使用规则：{defaultBackgroundPromptQuery.error.message}
+            </div>
+          )}
+          {defaultVideoSegmentPromptQuery.error && (
+            <div className="mt-4 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+              无法读取默认视频分段识别提示词：{defaultVideoSegmentPromptQuery.error.message}
+            </div>
+          )}
+          {defaultVideoFinalPromptQuery.error && (
+            <div className="mt-4 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+              无法读取默认视频最终总结提示词：{defaultVideoFinalPromptQuery.error.message}
+            </div>
+          )}
+          {(saveMutation.error || deleteMutation.error || scanMutation.error || browseMutation.error) && (
+            <div className="mt-4 whitespace-pre-line rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+              {(saveMutation.error ?? deleteMutation.error ?? scanMutation.error ?? browseMutation.error)?.message}
             </div>
           )}
 
@@ -393,10 +622,14 @@ function ModelSelector({
 function NumberField({
   label,
   value,
+  min = 1,
+  max,
   onChange,
 }: {
   label: string;
   value: number;
+  min?: number;
+  max?: number;
   onChange: (value: number) => void;
 }) {
   return (
@@ -405,9 +638,44 @@ function NumberField({
       <input
         className="control w-full"
         type="number"
-        min={1}
+        min={min}
+        max={max}
         value={value}
         onChange={(event) => onChange(Number(event.target.value))}
+      />
+    </label>
+  );
+}
+
+function OptionalNumberField({
+  label,
+  value,
+  min = 1,
+  max,
+  placeholder,
+  onChange,
+}: {
+  label: string;
+  value: number | null;
+  min?: number;
+  max?: number;
+  placeholder?: string;
+  onChange: (value: number | null) => void;
+}) {
+  return (
+    <label>
+      <span className="mb-1 block text-sm font-medium">{label}</span>
+      <input
+        className="control w-full"
+        type="number"
+        min={min}
+        max={max}
+        value={value ?? ''}
+        placeholder={placeholder}
+        onChange={(event) => {
+          const next = event.target.value;
+          onChange(next === '' ? null : Number(next));
+        }}
       />
     </label>
   );

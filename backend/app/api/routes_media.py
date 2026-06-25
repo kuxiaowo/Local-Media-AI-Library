@@ -9,12 +9,13 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
 from sqlalchemy import func, or_, select
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.core.path_utils import normalize_path
+from app.config import get_settings
 from app.database import get_db
-from app.models.db_models import DirectoryRule, MediaFile
-from app.models.schemas import MediaDirectoryRead, MediaListResponse, MediaRead
+from app.models.db_models import DirectoryRule, MediaFile, VideoFrameSummary
+from app.models.schemas import MediaDetailRead, MediaDirectoryRead, MediaListResponse
 from app.services.job_service import create_job
 from app.services.media_visibility import is_media_visible, visible_media_filter
 
@@ -89,10 +90,16 @@ def list_media_directories(db: Session = Depends(get_db)) -> list[MediaDirectory
     return sorted(directories.values(), key=lambda item: item.path)
 
 
-@router.get("/{media_id}", response_model=MediaRead)
+@router.get("/{media_id}", response_model=MediaDetailRead)
 def get_media(media_id: uuid.UUID, db: Session = Depends(get_db)) -> MediaFile:
     media = db.scalar(
-        select(MediaFile).options(joinedload(MediaFile.ai_summary)).where(MediaFile.id == media_id)
+        select(MediaFile)
+        .options(
+            joinedload(MediaFile.ai_summary),
+            selectinload(MediaFile.video_frames),
+            selectinload(MediaFile.video_segments),
+        )
+        .where(MediaFile.id == media_id)
     )
     if media is None:
         raise HTTPException(status_code=404, detail="Media not found")
@@ -107,6 +114,26 @@ def get_thumbnail(media_id: uuid.UUID, db: Session = Depends(get_db)) -> FileRes
     path = Path(media.thumbnail_path)
     if not path.exists():
         raise HTTPException(status_code=404, detail="Thumbnail file not found")
+    return FileResponse(path)
+
+
+@router.get("/{media_id}/frames/{frame_id}")
+def get_video_frame(media_id: uuid.UUID, frame_id: uuid.UUID, db: Session = Depends(get_db)) -> FileResponse:
+    frame = db.get(VideoFrameSummary, frame_id)
+    if frame is None or frame.media_id != media_id:
+        raise HTTPException(status_code=404, detail="Video frame not found")
+    media = db.get(MediaFile, media_id)
+    if media is None:
+        raise HTTPException(status_code=404, detail="Media not found")
+    _assert_media_is_under_known_root(db, media)
+
+    path = Path(frame.frame_path)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Video frame file not found")
+    try:
+        path.resolve().relative_to(get_settings().frame_cache_dir.resolve())
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Video frame is outside the frame cache")
     return FileResponse(path)
 
 

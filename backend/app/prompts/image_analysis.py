@@ -13,9 +13,8 @@ IMAGE_ANALYSIS_USER_PROMPT = """
 分析原则：
 1. 使用简体中文描述图片内容。
 2. 只描述图片中可见、可判断的内容，不要编造不可见信息。
-3. 如果提供了目录背景补充，它只能作为理解拍摄目的、命名习惯或搜索关键词的参考；如果背景与图片可见内容冲突，以图片可见内容为准。
-4. 标题必须简短、客观。如果图片中没有可见标题，请根据主要可见主体生成，例如“室内人物合影”“街景与车辆”“桌面物品特写”。
-5. 尽量保留便于搜索的关键词，尤其是场景、物体、动作、可见文字、风格、氛围、用途。
+3. 标题必须简短、客观。如果图片中没有可见标题，请根据主要可见主体生成，例如“室内人物合影”“街景与车辆”“桌面物品特写”。
+4. 尽量保留便于搜索的关键词，尤其是场景、物体、动作、可见文字、风格、氛围、用途。
 
 必须返回下面这些 JSON 字段：
 - title: string，简短中文标题，不能为空。
@@ -40,11 +39,20 @@ IMAGE_ANALYSIS_USER_PROMPT = """
 """.strip()
 
 
+BACKGROUND_CONTEXT_PROMPT = """
+请把目录背景补充只作为理解图片用途、拍摄场景、命名习惯或搜索关键词的参考。
+如果背景补充与图片可见内容冲突，必须以图片可见内容为准。
+不要把背景补充中没有被图片支持的内容当作事实写入摘要。
+""".strip()
+
+
 def build_image_analysis_user_prompt(
     *,
     custom_analysis_prompt: str | None = None,
     background_context: str | None = None,
+    background_context_prompt: str | None = None,
     default_analysis_prompt: str | None = None,
+    default_background_context_prompt: str | None = None,
 ) -> str:
     base_prompt = (
         (custom_analysis_prompt or "").strip()
@@ -55,10 +63,16 @@ def build_image_analysis_user_prompt(
     background = (background_context or "").strip()
 
     if background:
+        background_prompt = (
+            (background_context_prompt or "").strip()
+            or (default_background_context_prompt or "").strip()
+            or BACKGROUND_CONTEXT_PROMPT
+        )
         sections.append(
             "\n目录背景补充：\n"
             f"{background}\n"
-            "请把这段背景只作为理解图片用途、拍摄场景或命名关键词的参考；不要把背景中没有被图片支持的内容当作事实。"
+            "\n背景使用规则：\n"
+            f"{background_prompt}"
         )
 
     sections.append("\n固定输出要求：必须返回符合指定 schema 的有效 JSON，所有用户可见文本必须使用简体中文。")

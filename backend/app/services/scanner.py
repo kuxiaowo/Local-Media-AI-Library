@@ -34,7 +34,7 @@ def scan_directory(
         if not path.is_file():
             continue
         media_type = detect_media_type(path)
-        if media_type != "image":
+        if media_type is None:
             continue
 
         normalized = normalize_path(path)
@@ -73,7 +73,7 @@ def scan_directory(
                 media.status = "pending"
                 media.error_message = None
 
-        if image_support_status(path) == "recognized_unsupported":
+        if media_type == "image" and image_support_status(path) == "recognized_unsupported":
             media.status = "failed"
             media.error_message = "HEIC/HEIF is recognized but not supported in the MVP"
         elif mode == "full" or created or was_missing:

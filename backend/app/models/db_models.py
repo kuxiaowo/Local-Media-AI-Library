@@ -30,9 +30,15 @@ class DirectoryRule(Base, TimestampMixin):
     summary_model: Mapped[str] = mapped_column(Text, nullable=False)
     custom_analysis_prompt: Mapped[str | None] = mapped_column(Text)
     background_context: Mapped[str | None] = mapped_column(Text)
+    background_context_prompt: Mapped[str | None] = mapped_column(Text)
+    video_segment_prompt: Mapped[str | None] = mapped_column(Text)
+    video_final_summary_prompt: Mapped[str | None] = mapped_column(Text)
     video_frame_strategy: Mapped[str] = mapped_column(Text, nullable=False, default="hybrid")
     frame_interval_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=5)
     max_frames_per_video: Mapped[int] = mapped_column(Integer, nullable=False, default=12)
+    video_frame_max_width: Mapped[int] = mapped_column(Integer, nullable=False, default=1280)
+    video_frame_max_height: Mapped[int | None] = mapped_column(Integer)
+    video_batch_size: Mapped[int] = mapped_column(Integer, nullable=False, default=6)
     analysis_detail: Mapped[str] = mapped_column(Text, nullable=False, default="normal")
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
@@ -70,6 +76,18 @@ class MediaFile(Base, TimestampMixin):
     ai_summary: Mapped[MediaAiSummary | None] = relationship(
         "MediaAiSummary", back_populates="media", cascade="all, delete-orphan", uselist=False
     )
+    video_frames: Mapped[list[VideoFrameSummary]] = relationship(
+        "VideoFrameSummary",
+        back_populates="media",
+        cascade="all, delete-orphan",
+        order_by="VideoFrameSummary.timestamp_seconds",
+    )
+    video_segments: Mapped[list[VideoSegmentSummary]] = relationship(
+        "VideoSegmentSummary",
+        back_populates="media",
+        cascade="all, delete-orphan",
+        order_by="VideoSegmentSummary.segment_index",
+    )
     embeddings: Mapped[list[MediaEmbedding]] = relationship(
         "MediaEmbedding", back_populates="media", cascade="all, delete-orphan"
     )
@@ -99,6 +117,66 @@ class MediaAiSummary(Base, TimestampMixin):
     confidence: Mapped[str | None] = mapped_column(Text)
 
     media: Mapped[MediaFile] = relationship("MediaFile", back_populates="ai_summary")
+
+
+class VideoFrameSummary(Base):
+    __tablename__ = "video_frame_summaries"
+
+    id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=uuid.uuid4)
+    media_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(), ForeignKey("media_files.id", ondelete="CASCADE"), nullable=False
+    )
+    segment_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("video_segment_summaries.id", ondelete="SET NULL")
+    )
+    frame_index: Mapped[int | None] = mapped_column(Integer)
+    timestamp_seconds: Mapped[float] = mapped_column(Float, nullable=False)
+    frame_path: Mapped[str] = mapped_column(Text, nullable=False)
+    model_used: Mapped[str | None] = mapped_column(Text)
+    caption: Mapped[str | None] = mapped_column(Text)
+    objects: Mapped[list | dict | None] = mapped_column(JSON)
+    people: Mapped[list | dict | None] = mapped_column(JSON)
+    actions: Mapped[list | dict | None] = mapped_column(JSON)
+    text_visible: Mapped[list | dict | None] = mapped_column(JSON)
+    raw_json: Mapped[dict | None] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    media: Mapped[MediaFile] = relationship("MediaFile", back_populates="video_frames")
+    segment: Mapped[VideoSegmentSummary | None] = relationship("VideoSegmentSummary", back_populates="frames")
+
+
+class VideoSegmentSummary(Base):
+    __tablename__ = "video_segment_summaries"
+
+    id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=uuid.uuid4)
+    media_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(), ForeignKey("media_files.id", ondelete="CASCADE"), nullable=False
+    )
+    segment_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    start_time_seconds: Mapped[float | None] = mapped_column(Float)
+    end_time_seconds: Mapped[float | None] = mapped_column(Float)
+    frame_paths: Mapped[list | dict | None] = mapped_column(JSON)
+    current_segment_summary: Mapped[str | None] = mapped_column(Text)
+    current_segment_tags: Mapped[list | dict | None] = mapped_column(JSON)
+    important_objects: Mapped[list | dict | None] = mapped_column(JSON)
+    ocr_text: Mapped[list | dict | None] = mapped_column(JSON)
+    new_objects_or_scenes: Mapped[list | dict | None] = mapped_column(JSON)
+    updated_global_summary: Mapped[str | None] = mapped_column(Text)
+    updated_timeline: Mapped[list | dict | None] = mapped_column(JSON)
+    confidence: Mapped[float | None] = mapped_column(Float)
+    raw_json: Mapped[dict | None] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    media: Mapped[MediaFile] = relationship("MediaFile", back_populates="video_segments")
+    frames: Mapped[list[VideoFrameSummary]] = relationship(
+        "VideoFrameSummary",
+        back_populates="segment",
+        order_by="VideoFrameSummary.frame_index",
+    )
 
 
 class EmbeddingProfile(Base):

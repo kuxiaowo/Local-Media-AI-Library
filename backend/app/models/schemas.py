@@ -14,9 +14,15 @@ class DirectoryRuleBase(BaseModel):
     summary_model: str
     custom_analysis_prompt: str | None = ""
     background_context: str | None = ""
+    background_context_prompt: str | None = ""
+    video_segment_prompt: str | None = ""
+    video_final_summary_prompt: str | None = ""
     video_frame_strategy: Literal["fixed_interval", "scene", "hybrid"] = "hybrid"
     frame_interval_seconds: int = Field(default=5, ge=1)
-    max_frames_per_video: int = Field(default=12, ge=1, le=60)
+    max_frames_per_video: int = Field(default=12, ge=1, le=200)
+    video_frame_max_width: int = Field(default=1280, ge=160, le=4096)
+    video_frame_max_height: int | None = Field(default=None, ge=160, le=4096)
+    video_batch_size: int = Field(default=6, ge=1, le=24)
     analysis_detail: str = "normal"
     enabled: bool = True
 
@@ -32,9 +38,15 @@ class DirectoryRuleUpdate(BaseModel):
     summary_model: str | None = None
     custom_analysis_prompt: str | None = None
     background_context: str | None = None
+    background_context_prompt: str | None = None
+    video_segment_prompt: str | None = None
+    video_final_summary_prompt: str | None = None
     video_frame_strategy: Literal["fixed_interval", "scene", "hybrid"] | None = None
     frame_interval_seconds: int | None = Field(default=None, ge=1)
-    max_frames_per_video: int | None = Field(default=None, ge=1, le=60)
+    max_frames_per_video: int | None = Field(default=None, ge=1, le=200)
+    video_frame_max_width: int | None = Field(default=None, ge=160, le=4096)
+    video_frame_max_height: int | None = Field(default=None, ge=160, le=4096)
+    video_batch_size: int | None = Field(default=None, ge=1, le=24)
     analysis_detail: str | None = None
     enabled: bool | None = None
 
@@ -71,6 +83,44 @@ class MediaSummaryRead(BaseModel):
     updated_at: datetime
 
 
+class VideoFrameSummaryRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    segment_id: uuid.UUID | None
+    frame_index: int | None
+    timestamp_seconds: float
+    frame_path: str
+    model_used: str | None
+    caption: str | None
+    objects: Any
+    people: Any
+    actions: Any
+    text_visible: Any
+    raw_json: Any
+    created_at: datetime
+
+
+class VideoSegmentSummaryRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    segment_index: int
+    start_time_seconds: float | None
+    end_time_seconds: float | None
+    frame_paths: Any
+    current_segment_summary: str | None
+    current_segment_tags: Any
+    important_objects: Any
+    ocr_text: Any
+    new_objects_or_scenes: Any
+    updated_global_summary: str | None
+    updated_timeline: Any
+    confidence: float | None
+    raw_json: Any
+    created_at: datetime
+
+
 class MediaRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -85,6 +135,7 @@ class MediaRead(BaseModel):
     file_hash: str | None
     width: int | None
     height: int | None
+    duration_seconds: float | None
     captured_at: datetime | None
     captured_at_source: str | None
     captured_at_confidence: str | None
@@ -96,6 +147,11 @@ class MediaRead(BaseModel):
     created_at: datetime
     updated_at: datetime
     ai_summary: MediaSummaryRead | None = None
+
+
+class MediaDetailRead(MediaRead):
+    video_frames: list[VideoFrameSummaryRead] = Field(default_factory=list)
+    video_segments: list[VideoSegmentSummaryRead] = Field(default_factory=list)
 
 
 class MediaListResponse(BaseModel):

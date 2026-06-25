@@ -1,4 +1,5 @@
 from app.models.schemas import SearchRequest
+from app.config import get_settings
 from app.services.search_service import _select_embedding_model, parse_query_filters
 
 
@@ -20,4 +21,4 @@ class EmptySession:
 
 
 def test_select_embedding_model_uses_global_default() -> None:
-    assert _select_embedding_model(EmptySession()) == "nomic-embed-text"
+    assert _select_embedding_model(EmptySession()) == get_settings().default_embedding_model

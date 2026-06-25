@@ -1,9 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ImageOff, Play, RefreshCw, RotateCcw } from 'lucide-react';
 import { API_BASE } from '../api/client';
-import { getMediaQueue, getScanStatus, retryJob, startScan } from '../api/scan';
+import { getMediaQueue, getScanStatus, listJobs, retryJob, startScan } from '../api/scan';
 import { StatusBadge } from '../components/StatusBadge';
-import type { MediaQueueItem, ScanMode } from '../types';
+import type { Job, MediaQueueItem, ScanMode } from '../types';
+
+const maintenanceJobTypes = new Set(['cleanup_stale_media']);
 
 export function ScanPage() {
   const queryClient = useQueryClient();
@@ -17,11 +19,17 @@ export function ScanPage() {
     queryFn: getMediaQueue,
     refetchInterval: 1500,
   });
+  const jobsQuery = useQuery({
+    queryKey: ['jobs'],
+    queryFn: listJobs,
+    refetchInterval: 1500,
+  });
   const startMutation = useMutation({
     mutationFn: (mode: ScanMode) => startScan({ mode }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['media-queue'] });
       queryClient.invalidateQueries({ queryKey: ['scan-status'] });
+      queryClient.invalidateQueries({ queryKey: ['jobs'] });
     },
   });
   const retryMutation = useMutation({
@@ -29,11 +37,13 @@ export function ScanPage() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['media-queue'] });
       queryClient.invalidateQueries({ queryKey: ['scan-status'] });
+      queryClient.invalidateQueries({ queryKey: ['jobs'] });
     },
   });
 
   const status = statusQuery.data;
   const queueItems = mediaQueueQuery.data?.items ?? [];
+  const maintenanceJobs = (jobsQuery.data ?? []).filter((job) => maintenanceJobTypes.has(job.job_type));
 
   return (
     <div className="space-y-4">
@@ -163,6 +173,74 @@ export function ScanPage() {
           </table>
         </div>
       </section>
+
+      <section className="panel overflow-hidden">
+        <div className="flex items-center justify-between gap-3 border-b border-line px-4 py-3">
+          <div>
+            <div className="text-sm font-semibold">维护任务</div>
+            <div className="mt-1 text-xs text-slate-500">
+              清除过期数据等不绑定单张照片的后台任务会显示在这里
+            </div>
+          </div>
+          <button className="icon-btn" title="刷新维护任务" onClick={() => jobsQuery.refetch()}>
+            <RefreshCw className="h-4 w-4" />
+          </button>
+        </div>
+
+        {jobsQuery.error && (
+          <div className="m-4 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+            {jobsQuery.error.message}
+          </div>
+        )}
+
+        <div className="overflow-auto">
+          <table className="min-w-full text-left text-sm">
+            <thead className="border-b border-line bg-panel text-xs uppercase text-slate-500">
+              <tr>
+                <th className="px-4 py-2">任务</th>
+                <th className="px-4 py-2">状态</th>
+                <th className="px-4 py-2">进度</th>
+                <th className="px-4 py-2">结果</th>
+                <th className="px-4 py-2">创建时间</th>
+                <th className="px-4 py-2">错误</th>
+                <th className="px-4 py-2"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {maintenanceJobs.map((job) => (
+                <tr key={job.id} className="border-b border-line last:border-0">
+                  <td className="px-4 py-3 font-medium">{jobLabel(job)}</td>
+                  <td className="px-4 py-3">
+                    <StatusBadge status={job.status} />
+                  </td>
+                  <td className="px-4 py-3 text-slate-700">{jobProgress(job)}</td>
+                  <td className="px-4 py-3 text-slate-700">{jobResult(job)}</td>
+                  <td className="px-4 py-3 text-slate-500">{new Date(job.created_at).toLocaleString()}</td>
+                  <td className="max-w-md truncate px-4 py-3 text-red-700">{job.error_message}</td>
+                  <td className="px-4 py-3 text-right">
+                    {job.status === 'failed' && (
+                      <button
+                        className="icon-btn"
+                        title="重试维护任务"
+                        onClick={() => retryMutation.mutate(job.id)}
+                      >
+                        <RotateCcw className="h-4 w-4" />
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              ))}
+              {!jobsQuery.error && maintenanceJobs.length === 0 && (
+                <tr>
+                  <td className="px-4 py-10 text-center text-sm text-slate-500" colSpan={7}>
+                    暂无维护任务
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </section>
     </div>
   );
 }
@@ -209,4 +287,27 @@ function stageLabel(item: MediaQueueItem) {
 
 function fileName(path: string) {
   return path.split(/[\\/]/).pop() || path;
+}
+
+function jobLabel(job: Job) {
+  if (job.job_type === 'cleanup_stale_media') {
+    return '清除过期数据';
+  }
+  return job.job_type;
+}
+
+function jobProgress(job: Job) {
+  if (job.progress_total > 0) {
+    return `${job.progress_current} / ${job.progress_total}`;
+  }
+  return '-';
+}
+
+function jobResult(job: Job) {
+  const checked = typeof job.payload?.checked === 'number' ? job.payload.checked : null;
+  const deleted = typeof job.payload?.deleted === 'number' ? job.payload.deleted : null;
+  if (checked !== null || deleted !== null) {
+    return `检查 ${checked ?? 0}，删除 ${deleted ?? 0}`;
+  }
+  return '-';
 }

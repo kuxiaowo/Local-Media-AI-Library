@@ -12,10 +12,10 @@ from sqlalchemy.orm import joinedload
 from app.config import Settings
 from app.database import SessionLocal
 from app.models.db_models import DirectoryRule, Job, MediaFile
-from app.services.ai_analyzer import analyze_image
+from app.services.ai_analyzer import analyze_image, analyze_video
 from app.services.embedding_service import generate_embedding
 from app.services.job_service import mark_completed, mark_failed, mark_running
-from app.services.metadata_extractor import extract_image_metadata
+from app.services.metadata_extractor import extract_image_metadata, extract_video_metadata
 from app.services.ollama_client import OllamaClient
 from app.services.rule_resolver import resolve_rule, rule_config_hash
 from app.services.scanner import scan_directory
@@ -43,7 +43,7 @@ class WorkerManager:
         return [
             WorkerPoolConfig(("scan_directory",), 1, "scan"),
             WorkerPoolConfig(("extract_metadata",), 6, "metadata"),
-            WorkerPoolConfig(("analyze_image",), 1, "vision"),
+            WorkerPoolConfig(("analyze_image", "analyze_video"), 1, "vision"),
             WorkerPoolConfig(("generate_embedding",), 2, "embedding"),
             WorkerPoolConfig(("reanalyze_media",), 1, "reanalyze"),
             WorkerPoolConfig(("cleanup_stale_media",), 1, "maintenance"),
@@ -54,7 +54,7 @@ class WorkerManager:
         return [
             WorkerPoolConfig(("scan_directory",), settings.scan_worker_concurrency, "scan"),
             WorkerPoolConfig(("extract_metadata",), settings.metadata_worker_concurrency, "metadata"),
-            WorkerPoolConfig(("analyze_image",), settings.vision_worker_concurrency, "vision"),
+            WorkerPoolConfig(("analyze_image", "analyze_video"), settings.vision_worker_concurrency, "vision"),
             WorkerPoolConfig(("generate_embedding",), settings.embedding_worker_concurrency, "embedding"),
             WorkerPoolConfig(("reanalyze_media",), 1, "reanalyze"),
             WorkerPoolConfig(("cleanup_stale_media",), 1, "maintenance"),
@@ -172,6 +172,7 @@ class WorkerManager:
                 job = db.get(Job, job.id)
                 if job is not None:
                     mark_failed(job, str(exc))
+                    self._mark_target_media_failed(db, job, str(exc))
                     db.commit()
 
     def _execute_job(self, db, job: Job) -> None:
@@ -202,15 +203,19 @@ class WorkerManager:
                 raise RuntimeError(media.error_message)
             media.folder_rule_id = rule.id
             media.resolved_config_hash = rule_config_hash(rule)
-            extract_image_metadata(db, media)
+            if media.media_type == "video":
+                extract_video_metadata(db, media)
+            else:
+                extract_image_metadata(db, media)
             db.commit()
             if media.status == "metadata_done" and rule.enabled:
                 from app.services.job_service import create_job
 
-                create_job(db, job_type="analyze_image", target_id=media.id, target_path=media.path)
+                analyze_job_type = "analyze_video" if media.media_type == "video" else "analyze_image"
+                create_job(db, job_type=analyze_job_type, target_id=media.id, target_path=media.path)
             return
 
-        if job.job_type == "analyze_image":
+        if job.job_type in {"analyze_image", "analyze_video"}:
             media = db.scalar(
                 select(MediaFile)
                 .options(joinedload(MediaFile.folder_rule))
@@ -218,7 +223,10 @@ class WorkerManager:
             )
             if media is None:
                 raise RuntimeError("Media file does not exist")
-            asyncio.run(analyze_image(db, media, OllamaClient()))
+            if job.job_type == "analyze_video":
+                asyncio.run(analyze_video(db, media, OllamaClient()))
+            else:
+                asyncio.run(analyze_image(db, media, OllamaClient()))
             from app.services.job_service import create_job
 
             create_job(db, job_type="generate_embedding", target_id=media.id, target_path=media.path)
@@ -251,3 +259,22 @@ class WorkerManager:
             return
 
         raise RuntimeError(f"Unknown job type: {job.job_type}")
+
+    @staticmethod
+    def _mark_target_media_failed(db, job: Job, error: str) -> None:
+        if job.job_type not in {
+            "extract_metadata",
+            "analyze_image",
+            "analyze_video",
+            "generate_embedding",
+            "reanalyze_media",
+        }:
+            return
+        if job.target_id is None:
+            return
+        media = db.get(MediaFile, job.target_id)
+        if media is None or media.status == "missing":
+            return
+        media.status = "failed"
+        media.error_message = error[:4000]
+        db.add(media)

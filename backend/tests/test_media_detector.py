@@ -13,3 +13,8 @@ def test_detect_heic_as_recognized_unsupported() -> None:
 
 def test_ignore_unknown_extension() -> None:
     assert detect_media_type("x.txt") is None
+
+
+def test_detect_supported_video() -> None:
+    assert detect_media_type("clip.MP4") == "video"
+    assert detect_media_type("clip.webm") == "video"

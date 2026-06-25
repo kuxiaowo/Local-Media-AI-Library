@@ -46,11 +46,20 @@ export function MediaDetailPage() {
 
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1.2fr)_minmax(360px,0.8fr)]">
         <section className="panel overflow-hidden">
-          <img
-            src={`${API_BASE}/api/media/${media.id}/preview`}
-            alt={media.ai_summary?.title ?? media.path}
-            className="max-h-[72vh] w-full object-contain bg-slate-100"
-          />
+          {media.media_type === 'video' ? (
+            <video
+              src={`${API_BASE}/api/media/${media.id}/preview`}
+              className="max-h-[72vh] w-full bg-slate-950"
+              controls
+              preload="metadata"
+            />
+          ) : (
+            <img
+              src={`${API_BASE}/api/media/${media.id}/preview`}
+              alt={media.ai_summary?.title ?? media.path}
+              className="max-h-[72vh] w-full object-contain bg-slate-100"
+            />
+          )}
         </section>
 
         <section className="panel p-4">
@@ -59,8 +68,16 @@ export function MediaDetailPage() {
             <StatusBadge status={media.status} />
           </div>
           <dl className="grid grid-cols-[120px_1fr] gap-x-3 gap-y-2 text-sm">
+            <dt className="text-slate-500">类型</dt>
+            <dd>{media.media_type === 'video' ? '视频' : '图片'}</dd>
             <dt className="text-slate-500">尺寸</dt>
             <dd>{media.width && media.height ? `${media.width} x ${media.height}` : '-'}</dd>
+            {media.media_type === 'video' && (
+              <>
+                <dt className="text-slate-500">时长</dt>
+                <dd>{formatDuration(media.duration_seconds)}</dd>
+              </>
+            )}
             <dt className="text-slate-500">大小</dt>
             <dd>{media.file_size ? `${(media.file_size / 1024 / 1024).toFixed(2)} MB` : '-'}</dd>
             <dt className="text-slate-500">拍摄时间</dt>
@@ -100,9 +117,78 @@ export function MediaDetailPage() {
             </p>
           </div>
           <JsonBlock title="关键词" value={media.ai_summary?.search_keywords} />
+          {media.media_type === 'video' && <JsonBlock title="时间线" value={rawJsonValue(media.ai_summary?.raw_json, 'timeline')} />}
           <JsonBlock title="原始 JSON" value={media.ai_summary?.raw_json} />
         </div>
       </section>
+
+      {media.media_type === 'video' && media.video_segments && media.video_segments.length > 0 && (
+        <section className="panel p-4">
+          <h2 className="mb-3 text-base font-semibold">视频片段</h2>
+          <div className="space-y-3">
+            {media.video_segments.map((segment) => {
+              const frames = (media.video_frames ?? []).filter((frame) => frame.segment_id === segment.id);
+              return (
+                <article key={segment.id} className="rounded-md border border-slate-200 p-3">
+                  <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                    <h3 className="text-sm font-semibold">片段 {segment.segment_index}</h3>
+                    <span className="text-xs text-slate-500">
+                      {formatTimestamp(segment.start_time_seconds ?? 0)} -{' '}
+                      {formatTimestamp(segment.end_time_seconds ?? segment.start_time_seconds ?? 0)}
+                    </span>
+                  </div>
+                  <p className="whitespace-pre-wrap text-sm leading-6 text-slate-700">
+                    {segment.current_segment_summary ?? '-'}
+                  </p>
+                  <div className="mt-3 grid gap-3 lg:grid-cols-2">
+                    <TextList title="标签" value={segment.current_segment_tags} />
+                    <TextList title="OCR" value={segment.ocr_text} />
+                    <TextList title="重要物体/场景" value={segment.important_objects} />
+                    <TextList title="新增线索" value={segment.new_objects_or_scenes} />
+                  </div>
+                  {frames.length > 0 && (
+                    <div className="mt-3 grid gap-2 sm:grid-cols-3 xl:grid-cols-6">
+                      {frames.map((frame) => (
+                        <img
+                          key={frame.id}
+                          src={`${API_BASE}/api/media/${media.id}/frames/${frame.id}`}
+                          alt={`片段 ${segment.segment_index} 关键帧 ${frame.frame_index ?? ''}`}
+                          className="aspect-video w-full rounded-md bg-slate-100 object-cover"
+                          loading="lazy"
+                        />
+                      ))}
+                    </div>
+                  )}
+                </article>
+              );
+            })}
+          </div>
+        </section>
+      )}
+
+      {media.media_type === 'video' && media.video_frames && media.video_frames.length > 0 && (
+        <section className="panel p-4">
+          <h2 className="mb-3 text-base font-semibold">关键帧</h2>
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+            {media.video_frames.map((frame) => (
+              <div key={frame.id} className="overflow-hidden rounded-md border border-slate-200 bg-white">
+                <img
+                  src={`${API_BASE}/api/media/${media.id}/frames/${frame.id}`}
+                  alt={frame.caption ?? `关键帧 ${formatTimestamp(frame.timestamp_seconds)}`}
+                  className="aspect-video w-full bg-slate-100 object-cover"
+                  loading="lazy"
+                />
+                <div className="space-y-2 p-3">
+                  <div className="text-xs font-semibold text-slate-500">
+                    {formatTimestamp(frame.timestamp_seconds)}
+                  </div>
+                  <p className="line-clamp-3 text-sm text-slate-700">{frame.caption ?? '-'}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
 
       <a
         href={`${API_BASE}/api/media/${media.id}/preview`}
@@ -115,6 +201,58 @@ export function MediaDetailPage() {
       </a>
     </div>
   );
+}
+
+function formatDuration(seconds: number | null) {
+  if (!seconds || seconds <= 0) {
+    return '-';
+  }
+  const whole = Math.round(seconds);
+  const hours = Math.floor(whole / 3600);
+  const minutes = Math.floor((whole % 3600) / 60);
+  const secs = whole % 60;
+  if (hours > 0) {
+    return `${hours}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+  }
+  return `${minutes}:${String(secs).padStart(2, '0')}`;
+}
+
+function formatTimestamp(seconds: number) {
+  if (!Number.isFinite(seconds)) {
+    return '0:00';
+  }
+  return formatDuration(seconds) === '-' ? '0:00' : formatDuration(seconds);
+}
+
+function TextList({ title, value }: { title: string; value: unknown }) {
+  const items = toTextList(value);
+  return (
+    <div>
+      <h4 className="mb-1 text-xs font-semibold text-slate-500">{title}</h4>
+      <p className="text-sm text-slate-700">{items.length > 0 ? items.join('、') : '-'}</p>
+    </div>
+  );
+}
+
+function toTextList(value: unknown): string[] {
+  if (!value) {
+    return [];
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item).trim()).filter(Boolean);
+  }
+  if (typeof value === 'object') {
+    return Object.values(value).map((item) => String(item).trim()).filter(Boolean);
+  }
+  const text = String(value).trim();
+  return text ? [text] : [];
+}
+
+function rawJsonValue(value: unknown, key: string) {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+  return (value as Record<string, unknown>)[key] ?? null;
 }
 
 function JsonBlock({ title, value }: { title: string; value: unknown }) {

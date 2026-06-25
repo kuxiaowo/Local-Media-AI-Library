@@ -20,7 +20,14 @@ class Settings(BaseSettings):
 
     cache_dir: Path = Path("./data/cache")
     thumbnail_dir: Path = Path("./data/thumbnails")
+    frame_cache_dir: Path = Path("./data/video_frames")
     max_image_long_edge: int = 1280
+    default_max_frames_per_video: int = 12
+    default_frame_interval_seconds: int = 5
+    default_video_frame_max_width: int = 1280
+    default_video_batch_size: int = 6
+    default_video_frame_max_height: int | None = None
+    ollama_num_ctx: int = 32768
 
     default_vision_model: str = "qwen2.5vl:7b"
     default_summary_model: str = "qwen3:8b"
@@ -44,6 +51,7 @@ class Settings(BaseSettings):
     def ensure_dirs(self) -> None:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.thumbnail_dir.mkdir(parents=True, exist_ok=True)
+        self.frame_cache_dir.mkdir(parents=True, exist_ok=True)
 
 
 @lru_cache

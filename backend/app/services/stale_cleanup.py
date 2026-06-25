@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 from sqlalchemy import select
@@ -24,6 +25,7 @@ def cleanup_stale_media(db: Session, job: Job | None = None) -> dict[str, int]:
     for index, media in enumerate(media_files, start=1):
         if _is_stale(media):
             _delete_thumbnail_cache(media.thumbnail_path)
+            _delete_video_frame_cache(str(media.id))
             db.delete(media)
             deleted += 1
 
@@ -66,5 +68,23 @@ def _delete_thumbnail_cache(thumbnail_path: str | None) -> None:
 
     try:
         thumbnail.unlink(missing_ok=True)
+    except OSError:
+        return
+
+
+def _delete_video_frame_cache(media_id: str) -> None:
+    settings = get_settings()
+    try:
+        frame_dir = (settings.frame_cache_dir / media_id).resolve()
+        frame_root = settings.frame_cache_dir.resolve()
+        frame_dir.relative_to(frame_root)
+    except (OSError, ValueError):
+        return
+
+    if not frame_dir.exists():
+        return
+
+    try:
+        shutil.rmtree(frame_dir)
     except OSError:
         return

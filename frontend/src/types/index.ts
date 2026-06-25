@@ -7,9 +7,15 @@ export interface DirectoryRule {
   summary_model: string;
   custom_analysis_prompt: string | null;
   background_context: string | null;
+  background_context_prompt: string | null;
+  video_segment_prompt: string | null;
+  video_final_summary_prompt: string | null;
   video_frame_strategy: 'fixed_interval' | 'scene' | 'hybrid';
   frame_interval_seconds: number;
   max_frames_per_video: number;
+  video_frame_max_width: number;
+  video_frame_max_height: number | null;
+  video_batch_size: number;
   analysis_detail: string;
   enabled: boolean;
   created_at: string;
@@ -23,9 +29,15 @@ export interface DirectoryRulePayload {
   summary_model: string;
   custom_analysis_prompt: string | null;
   background_context: string | null;
+  background_context_prompt: string | null;
+  video_segment_prompt: string | null;
+  video_final_summary_prompt: string | null;
   video_frame_strategy: 'fixed_interval' | 'scene' | 'hybrid';
   frame_interval_seconds: number;
   max_frames_per_video: number;
+  video_frame_max_width: number;
+  video_frame_max_height: number | null;
+  video_batch_size: number;
   analysis_detail: string;
   enabled: boolean;
 }
@@ -51,6 +63,40 @@ export interface MediaSummary {
   updated_at: string;
 }
 
+export interface VideoFrameSummary {
+  id: string;
+  segment_id: string | null;
+  frame_index: number | null;
+  timestamp_seconds: number;
+  frame_path: string;
+  model_used: string | null;
+  caption: string | null;
+  objects: unknown;
+  people: unknown;
+  actions: unknown;
+  text_visible: unknown;
+  raw_json: unknown;
+  created_at: string;
+}
+
+export interface VideoSegmentSummary {
+  id: string;
+  segment_index: number;
+  start_time_seconds: number | null;
+  end_time_seconds: number | null;
+  frame_paths: unknown;
+  current_segment_summary: string | null;
+  current_segment_tags: unknown;
+  important_objects: unknown;
+  ocr_text: unknown;
+  new_objects_or_scenes: unknown;
+  updated_global_summary: string | null;
+  updated_timeline: unknown;
+  confidence: number | null;
+  raw_json: unknown;
+  created_at: string;
+}
+
 export interface MediaFile {
   id: string;
   path: string;
@@ -63,6 +109,7 @@ export interface MediaFile {
   file_hash: string | null;
   width: number | null;
   height: number | null;
+  duration_seconds: number | null;
   captured_at: string | null;
   captured_at_source: string | null;
   captured_at_confidence: string | null;
@@ -74,6 +121,8 @@ export interface MediaFile {
   created_at: string;
   updated_at: string;
   ai_summary: MediaSummary | null;
+  video_frames?: VideoFrameSummary[];
+  video_segments?: VideoSegmentSummary[];
 }
 
 export interface MediaListResponse {
@@ -149,6 +198,7 @@ export interface OllamaModels {
 
 export interface RuntimeSettings {
   default_embedding_model: string;
+  max_image_long_edge: number;
   scan_worker_concurrency: number;
   metadata_worker_concurrency: number;
   vision_worker_concurrency: number;
@@ -157,6 +207,10 @@ export interface RuntimeSettings {
 
 export interface AnalysisPromptSettings {
   prompt: string;
+}
+
+export interface DirectoryPickerResponse {
+  path: string | null;
 }
 
 export interface SearchResultItem {
