@@ -1,0 +1,101 @@
+IMAGE_ANALYSIS_SYSTEM_PROMPT = """
+你是本地媒体库的图片分析系统。
+请只描述图片中可见、可判断的内容；不要推断人物身份、姓名、年龄、职业、国籍、宗教、政治观点或其他敏感属性。
+所有面向用户的文本字段必须使用简体中文。
+必须返回符合指定 schema 的有效 JSON，不要输出 Markdown、解释文字或多余前后缀。
+如果图片中没有明确标题，请根据可见主体生成一个简短、客观的中文标题。
+title、short_summary、detailed_summary 不允许为空。
+""".strip()
+
+IMAGE_ANALYSIS_USER_PROMPT = """
+请分析这张图片，并只返回一个 JSON 对象。
+
+分析原则：
+1. 使用简体中文描述图片内容。
+2. 只描述图片中可见、可判断的内容，不要编造不可见信息。
+3. 如果提供了目录背景补充，它只能作为理解拍摄目的、命名习惯或搜索关键词的参考；如果背景与图片可见内容冲突，以图片可见内容为准。
+4. 标题必须简短、客观。如果图片中没有可见标题，请根据主要可见主体生成，例如“室内人物合影”“街景与车辆”“桌面物品特写”。
+5. 尽量保留便于搜索的关键词，尤其是场景、物体、动作、可见文字、风格、氛围、用途。
+
+必须返回下面这些 JSON 字段：
+- title: string，简短中文标题，不能为空。
+- short_summary: string，一句话中文摘要，不能为空。
+- detailed_summary: string，较完整的中文描述，说明主体、场景、动作、物体、可见文字和氛围，不能为空。
+- scene: string，场景或环境，例如“室内房间”“街道”“桌面”“截图界面”，不确定时写“未知场景”。
+- objects: string[]，主要可见物体列表。
+- people: string[]，可见人物的客观描述列表；不要推断身份、姓名、年龄、职业、国籍、宗教或政治观点。
+- actions: string[]，可见动作或事件列表。
+- text_visible: string[]，图片中可读文字列表；没有则返回空数组。
+- location_guess: string，基于可见内容的地点线索；不确定时写“unknown”。
+- time_clues: string，基于可见内容或 EXIF 以外画面线索的时间线索；不确定时写“unknown”。
+- mood: string，画面氛围或情绪，例如“安静”“热闹”“明亮”“unknown”。
+- search_keywords: string[]，适合搜索的中文关键词和短语。
+- confidence: string，只能是 high、medium、low。
+
+输出要求：
+1. 只输出 JSON 对象本身。
+2. 不要输出 Markdown 代码块。
+3. 不要输出解释、前缀、后缀或注释。
+4. 不要遗漏字段。
+""".strip()
+
+
+def build_image_analysis_user_prompt(
+    *,
+    custom_analysis_prompt: str | None = None,
+    background_context: str | None = None,
+    default_analysis_prompt: str | None = None,
+) -> str:
+    base_prompt = (
+        (custom_analysis_prompt or "").strip()
+        or (default_analysis_prompt or "").strip()
+        or IMAGE_ANALYSIS_USER_PROMPT
+    )
+    sections = [base_prompt]
+    background = (background_context or "").strip()
+
+    if background:
+        sections.append(
+            "\n目录背景补充：\n"
+            f"{background}\n"
+            "请把这段背景只作为理解图片用途、拍摄场景或命名关键词的参考；不要把背景中没有被图片支持的内容当作事实。"
+        )
+
+    sections.append("\n固定输出要求：必须返回符合指定 schema 的有效 JSON，所有用户可见文本必须使用简体中文。")
+
+    return "\n".join(sections)
+
+
+IMAGE_ANALYSIS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "title": {"type": "string"},
+        "short_summary": {"type": "string"},
+        "detailed_summary": {"type": "string"},
+        "scene": {"type": "string"},
+        "objects": {"type": "array", "items": {"type": "string"}},
+        "people": {"type": "array", "items": {"type": "string"}},
+        "actions": {"type": "array", "items": {"type": "string"}},
+        "text_visible": {"type": "array", "items": {"type": "string"}},
+        "location_guess": {"type": "string"},
+        "time_clues": {"type": "string"},
+        "mood": {"type": "string"},
+        "search_keywords": {"type": "array", "items": {"type": "string"}},
+        "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+    },
+    "required": [
+        "title",
+        "short_summary",
+        "detailed_summary",
+        "scene",
+        "objects",
+        "people",
+        "actions",
+        "text_visible",
+        "location_guess",
+        "time_clues",
+        "mood",
+        "search_keywords",
+        "confidence",
+    ],
+}
