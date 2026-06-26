@@ -1,20 +1,74 @@
-import { useMutation, useQuery } from '@tanstack/react-query';
+import { FormEvent, useEffect, useState } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useParams } from 'react-router-dom';
-import { ExternalLink, FolderOpen, RotateCcw } from 'lucide-react';
+import { ExternalLink, FolderOpen, RotateCcw, Save } from 'lucide-react';
 import { API_BASE } from '../api/client';
-import { getMedia, openMediaLocation, reanalyzeMedia } from '../api/media';
+import {
+  getMedia,
+  openMediaLocation,
+  reanalyzeMedia,
+  reanalyzeVideoFinalSummary,
+  updateMediaBackgroundContext,
+} from '../api/media';
 import { StatusBadge } from '../components/StatusBadge';
 
 export function MediaDetailPage() {
   const { id } = useParams<{ id: string }>();
+  const queryClient = useQueryClient();
+  const [backgroundForm, setBackgroundForm] = useState({
+    background_context: '',
+  });
   const query = useQuery({
     queryKey: ['media-detail', id],
     queryFn: () => getMedia(id!),
     enabled: Boolean(id),
   });
-  const reanalyzeMutation = useMutation({ mutationFn: () => reanalyzeMedia(id!) });
+  const reanalyzeMutation = useMutation({
+    mutationFn: () => reanalyzeMedia(id!),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['media-detail', id] });
+      queryClient.invalidateQueries({ queryKey: ['media-queue'] });
+      queryClient.invalidateQueries({ queryKey: ['jobs'] });
+    },
+  });
+  const finalSummaryMutation = useMutation({
+    mutationFn: () => reanalyzeVideoFinalSummary(id!),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['media-detail', id] });
+      queryClient.invalidateQueries({ queryKey: ['media-queue'] });
+      queryClient.invalidateQueries({ queryKey: ['jobs'] });
+    },
+  });
+  const saveBackgroundMutation = useMutation({
+    mutationFn: () =>
+      updateMediaBackgroundContext(id!, {
+        background_context: backgroundForm.background_context || null,
+      }),
+    onSuccess: (data) => {
+      setBackgroundForm({
+        background_context: data.background_context ?? '',
+      });
+      queryClient.invalidateQueries({ queryKey: ['media-detail', id] });
+      queryClient.invalidateQueries({ queryKey: ['media'] });
+      queryClient.invalidateQueries({ queryKey: ['media-queue'] });
+    },
+  });
   const openMutation = useMutation({ mutationFn: () => openMediaLocation(id!) });
   const media = query.data;
+
+  useEffect(() => {
+    if (!media) {
+      return;
+    }
+    setBackgroundForm({
+      background_context: media.background_context ?? '',
+    });
+  }, [media?.id, media?.background_context]);
+
+  function submitBackground(event: FormEvent) {
+    event.preventDefault();
+    saveBackgroundMutation.mutate();
+  }
 
   if (query.error) {
     return <div className="panel p-4 text-sm text-red-700">{query.error.message}</div>;
@@ -37,12 +91,41 @@ export function MediaDetailPage() {
             <FolderOpen className="h-4 w-4" />
             位置
           </button>
-          <button className="btn" onClick={() => reanalyzeMutation.mutate()}>
-            <RotateCcw className="h-4 w-4" />
-            重分析
-          </button>
+          {media.media_type === 'video' ? (
+            <>
+              <button
+                className="btn"
+                onClick={() => reanalyzeMutation.mutate()}
+                disabled={reanalyzeMutation.isPending}
+                title="重新抽帧、分段分析、最终总结和搜索向量"
+              >
+                <RotateCcw className="h-4 w-4" />
+                全部重新生成
+              </button>
+              <button
+                className="btn"
+                onClick={() => finalSummaryMutation.mutate()}
+                disabled={finalSummaryMutation.isPending || !media.video_segments?.length}
+                title="只基于已有视频片段重新生成最终总结和搜索向量"
+              >
+                <RotateCcw className="h-4 w-4" />
+                重新生成最终总结
+              </button>
+            </>
+          ) : (
+            <button className="btn" onClick={() => reanalyzeMutation.mutate()} disabled={reanalyzeMutation.isPending}>
+              <RotateCcw className="h-4 w-4" />
+              重新生成
+            </button>
+          )}
         </div>
       </header>
+
+      {(reanalyzeMutation.error || finalSummaryMutation.error || saveBackgroundMutation.error) && (
+        <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+          {(reanalyzeMutation.error ?? finalSummaryMutation.error ?? saveBackgroundMutation.error)?.message}
+        </div>
+      )}
 
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1.2fr)_minmax(360px,0.8fr)]">
         <section className="panel overflow-hidden">
@@ -95,6 +178,37 @@ export function MediaDetailPage() {
           )}
         </section>
       </div>
+
+      <form className="panel p-4" onSubmit={submitBackground}>
+        <div className="mb-3">
+          <h2 className="text-base font-semibold">当前媒体背景提示</h2>
+          <p className="mt-1 text-xs leading-5 text-slate-500">
+            留空时使用目录背景补充；背景使用规则仍沿用目录规则。保存后重新生成，新的背景提示才会进入模型分析。
+          </p>
+        </div>
+        <div className="max-w-3xl">
+          <label>
+            <span className="mb-1 block text-sm font-medium">背景补充</span>
+            <textarea
+              className="control min-h-28 w-full resize-y"
+              value={backgroundForm.background_context}
+              onChange={(event) =>
+                setBackgroundForm({ ...backgroundForm, background_context: event.target.value })
+              }
+              placeholder="只对当前媒体生效"
+            />
+          </label>
+        </div>
+        {saveBackgroundMutation.isSuccess && (
+          <div className="mt-4 rounded-md border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-800">
+            当前媒体背景提示已保存。
+          </div>
+        )}
+        <button className="btn btn-primary mt-4" type="submit" disabled={saveBackgroundMutation.isPending}>
+          <Save className="h-4 w-4" />
+          保存背景提示
+        </button>
+      </form>
 
       <section className="panel p-4">
         <div className="mb-3 flex items-center gap-2">

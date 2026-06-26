@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.models.db_models import MediaAiSummary, MediaFile, VideoFrameSummary, VideoSegmentSummary
@@ -26,6 +27,7 @@ from app.services.searchable_text import build_searchable_text
 from app.services.video_frame_extractor import ExtractedFrame, batch_frames, extract_video_frames
 
 NO_VIDEO_HISTORY = "暂无历史信息"
+ProgressCallback = Callable[[str, int, int], None]
 
 
 async def analyze_image(db: Session, media: MediaFile, ollama: OllamaClient) -> MediaAiSummary:
@@ -34,15 +36,19 @@ async def analyze_image(db: Session, media: MediaFile, ollama: OllamaClient) -> 
         media.error_message = "No enabled directory rule matched this media file"
         raise RuntimeError(media.error_message)
 
+    rule = media.folder_rule
+    background_context = _effective_background_context(media, rule)
+    background_context_prompt = _effective_background_context_prompt(rule)
+
     media.status = "analyzing"
     db.commit()
     raw = await ollama.generate_vision_json(
-        model=media.folder_rule.vision_model,
+        model=rule.vision_model,
         image_path=media.path,
         schema=IMAGE_ANALYSIS_SCHEMA,
-        custom_analysis_prompt=media.folder_rule.custom_analysis_prompt,
-        background_context=media.folder_rule.background_context,
-        background_context_prompt=media.folder_rule.background_context_prompt,
+        custom_analysis_prompt=rule.custom_analysis_prompt,
+        background_context=background_context,
+        background_context_prompt=background_context_prompt,
     )
     raw = _normalize_image_analysis(raw)
     searchable_text = build_searchable_text(
@@ -63,8 +69,8 @@ async def analyze_image(db: Session, media: MediaFile, ollama: OllamaClient) -> 
     )
     summary = db.get(MediaAiSummary, media.id)
     if summary is None:
-        summary = MediaAiSummary(media_id=media.id, model_used=media.folder_rule.vision_model)
-    summary.model_used = media.folder_rule.vision_model
+        summary = MediaAiSummary(media_id=media.id, model_used=rule.vision_model)
+    summary.model_used = rule.vision_model
     summary.title = raw.get("title")
     summary.short_summary = raw.get("short_summary")
     summary.detailed_summary = raw.get("detailed_summary")
@@ -81,7 +87,7 @@ async def analyze_image(db: Session, media: MediaFile, ollama: OllamaClient) -> 
     summary.raw_json = raw
     summary.confidence = raw.get("confidence")
     db.add(summary)
-    media.status = "done"
+    media.status = "embedding_pending"
     media.error_message = None
     db.add(media)
     db.commit()
@@ -89,7 +95,13 @@ async def analyze_image(db: Session, media: MediaFile, ollama: OllamaClient) -> 
     return summary
 
 
-async def analyze_video(db: Session, media: MediaFile, ollama: OllamaClient) -> MediaAiSummary:
+async def analyze_video(
+    db: Session,
+    media: MediaFile,
+    ollama: OllamaClient,
+    progress_callback: ProgressCallback | None = None,
+    resume_existing_segments: bool = False,
+) -> MediaAiSummary:
     if media.folder_rule is None:
         media.status = "failed"
         media.error_message = "No enabled directory rule matched this media file"
@@ -97,8 +109,10 @@ async def analyze_video(db: Session, media: MediaFile, ollama: OllamaClient) -> 
 
     rule = media.folder_rule
     media.status = "analyzing"
+    media.error_message = None
     db.commit()
 
+    _report_progress(progress_callback, "extract_frames", 0, 0)
     frames = extract_video_frames(
         media.path,
         media.id,
@@ -118,19 +132,34 @@ async def analyze_video(db: Session, media: MediaFile, ollama: OllamaClient) -> 
     if not frame_batches:
         raise RuntimeError("No video frames were extracted")
 
-    db.execute(delete(VideoFrameSummary).where(VideoFrameSummary.media_id == media.id))
-    db.execute(delete(VideoSegmentSummary).where(VideoSegmentSummary.media_id == media.id))
-    db.commit()
+    total_batches = len(frame_batches)
+    saved_segments = (
+        _load_contiguous_video_segments(db, media, total_batches)
+        if resume_existing_segments
+        else []
+    )
+    _trim_video_segments_from(db, media, len(saved_segments) + 1)
+    _report_progress(progress_callback, "analyze_segments", len(saved_segments), total_batches)
 
-    saved_segments: list[VideoSegmentSummary] = []
     default_video_segment_prompt = get_default_video_segment_prompt()
     default_video_segment_system_prompt = get_default_video_segment_system_prompt()
     default_video_final_summary_prompt = get_default_video_final_summary_prompt()
     default_video_final_summary_system_prompt = get_default_video_final_summary_system_prompt()
+    background_context = _effective_background_context(media, rule)
+    background_context_prompt = _effective_background_context_prompt(rule)
 
-    previous_global_summary = NO_VIDEO_HISTORY
+    previous_global_summary = (
+        _clean_text(saved_segments[-1].updated_global_summary)
+        if saved_segments
+        else NO_VIDEO_HISTORY
+    )
+    if not previous_global_summary:
+        previous_global_summary = NO_VIDEO_HISTORY
     frame_indices = {id(frame): index for index, frame in enumerate(frames, start=1)}
     for segment_index, current_batch in enumerate(frame_batches, start=1):
+        if segment_index <= len(saved_segments):
+            continue
+        _report_progress(progress_callback, "analyze_segments", segment_index, total_batches)
         frame_infos = _frame_infos(current_batch, frame_indices=frame_indices)
         raw = await ollama.generate_vision_batch_json(
             model=rule.vision_model,
@@ -143,8 +172,8 @@ async def analyze_video(db: Session, media: MediaFile, ollama: OllamaClient) -> 
             prompt=build_video_segment_user_prompt(
                 previous_global_summary=previous_global_summary,
                 frame_infos=frame_infos,
-                background_context=rule.background_context,
-                background_context_prompt=rule.background_context_prompt,
+                background_context=background_context,
+                background_context_prompt=background_context_prompt,
                 custom_segment_prompt=rule.video_segment_prompt,
                 default_segment_prompt=default_video_segment_prompt,
             ),
@@ -203,6 +232,7 @@ async def analyze_video(db: Session, media: MediaFile, ollama: OllamaClient) -> 
     if not saved_segments:
         raise RuntimeError("No video segment analysis was produced")
 
+    _report_progress(progress_callback, "final_summary", total_batches, total_batches)
     return await _finalize_video_summary(
         db=db,
         media=media,
@@ -213,6 +243,106 @@ async def analyze_video(db: Session, media: MediaFile, ollama: OllamaClient) -> 
         default_video_final_summary_system_prompt=default_video_final_summary_system_prompt,
         default_video_final_summary_prompt=default_video_final_summary_prompt,
     )
+
+
+async def regenerate_video_final_summary(
+    db: Session,
+    media: MediaFile,
+    ollama: OllamaClient,
+) -> MediaAiSummary:
+    if media.media_type != "video":
+        raise RuntimeError("Only video media can regenerate a final summary")
+    if media.folder_rule is None:
+        media.status = "failed"
+        media.error_message = "No enabled directory rule matched this media file"
+        raise RuntimeError(media.error_message)
+
+    saved_segments = list(
+        db.scalars(
+            select(VideoSegmentSummary)
+            .where(VideoSegmentSummary.media_id == media.id)
+            .order_by(VideoSegmentSummary.segment_index)
+        ).all()
+    )
+    if not saved_segments:
+        raise RuntimeError("Video has no segment summaries to regenerate the final summary")
+
+    media.status = "analyzing"
+    media.error_message = None
+    db.add(media)
+    db.commit()
+
+    final_global_summary = _clean_text(
+        media.ai_summary.raw_json.get("final_global_summary")
+        if media.ai_summary and isinstance(media.ai_summary.raw_json, dict)
+        else None
+    )
+    if not final_global_summary:
+        final_global_summary = _clean_text(saved_segments[-1].updated_global_summary)
+    if not final_global_summary:
+        final_global_summary = _join_segment_summaries(saved_segments)
+
+    return await _finalize_video_summary(
+        db=db,
+        media=media,
+        rule=media.folder_rule,
+        ollama=ollama,
+        saved_segments=saved_segments,
+        final_global_summary=final_global_summary,
+        default_video_final_summary_system_prompt=get_default_video_final_summary_system_prompt(),
+        default_video_final_summary_prompt=get_default_video_final_summary_prompt(),
+    )
+
+
+def _load_contiguous_video_segments(
+    db: Session,
+    media: MediaFile,
+    total_batches: int,
+) -> list[VideoSegmentSummary]:
+    existing_segments = list(
+        db.scalars(
+            select(VideoSegmentSummary)
+            .where(
+                VideoSegmentSummary.media_id == media.id,
+                VideoSegmentSummary.segment_index >= 1,
+                VideoSegmentSummary.segment_index <= total_batches,
+            )
+            .order_by(VideoSegmentSummary.segment_index)
+        ).all()
+    )
+    segments_by_index: dict[int, VideoSegmentSummary] = {}
+    for segment in existing_segments:
+        segments_by_index.setdefault(segment.segment_index, segment)
+
+    contiguous_segments = []
+    for segment_index in range(1, total_batches + 1):
+        segment = segments_by_index.get(segment_index)
+        if segment is None:
+            break
+        contiguous_segments.append(segment)
+    return contiguous_segments
+
+
+def _trim_video_segments_from(db: Session, media: MediaFile, first_segment_index: int) -> None:
+    stale_segment_ids = list(
+        db.scalars(
+            select(VideoSegmentSummary.id).where(
+                VideoSegmentSummary.media_id == media.id,
+                VideoSegmentSummary.segment_index >= first_segment_index,
+            )
+        ).all()
+    )
+    if stale_segment_ids:
+        db.execute(delete(VideoFrameSummary).where(VideoFrameSummary.segment_id.in_(stale_segment_ids)))
+    db.execute(
+        delete(VideoSegmentSummary).where(
+            VideoSegmentSummary.media_id == media.id,
+            VideoSegmentSummary.segment_index >= first_segment_index,
+        )
+    )
+    if first_segment_index <= 1:
+        db.execute(delete(VideoFrameSummary).where(VideoFrameSummary.media_id == media.id))
+    db.commit()
 
 
 async def _finalize_video_summary(
@@ -227,6 +357,8 @@ async def _finalize_video_summary(
     default_video_final_summary_prompt: str,
 ) -> MediaAiSummary:
     segment_payloads = _segment_payloads(saved_segments)
+    background_context = _effective_background_context(media, rule)
+    background_context_prompt = _effective_background_context_prompt(rule)
     raw = await ollama.generate_text_json(
         model=rule.summary_model,
         schema=VIDEO_FINAL_SUMMARY_SCHEMA,
@@ -238,8 +370,8 @@ async def _finalize_video_summary(
             duration_seconds=media.duration_seconds,
             segments=segment_payloads,
             final_global_summary=final_global_summary,
-            background_context=rule.background_context,
-            background_context_prompt=rule.background_context_prompt,
+            background_context=background_context,
+            background_context_prompt=background_context_prompt,
             custom_final_prompt=rule.video_final_summary_prompt,
             default_final_prompt=default_video_final_summary_prompt,
         ),
@@ -292,7 +424,7 @@ async def _finalize_video_summary(
     }
     summary.confidence = raw.get("confidence")
     db.add(summary)
-    media.status = "done"
+    media.status = "embedding_pending"
     media.error_message = None
     db.add(media)
     db.commit()
@@ -572,6 +704,24 @@ def _confidence_label(value: float | None) -> str:
     if value >= 0.45:
         return "medium"
     return "low"
+
+
+def _effective_background_context(media: MediaFile, rule: object) -> str | None:
+    return _clean_text(getattr(media, "background_context", None)) or getattr(rule, "background_context", None)
+
+
+def _effective_background_context_prompt(rule: object) -> str | None:
+    return getattr(rule, "background_context_prompt", None)
+
+
+def _report_progress(
+    progress_callback: ProgressCallback | None,
+    stage: str,
+    current: int,
+    total: int,
+) -> None:
+    if progress_callback is not None:
+        progress_callback(stage, current, total)
 
 
 def _clean_text(value: object) -> str:

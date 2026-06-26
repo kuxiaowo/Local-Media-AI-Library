@@ -14,8 +14,14 @@ from sqlalchemy.orm import Session, joinedload, selectinload
 from app.core.path_utils import normalize_path
 from app.config import get_settings
 from app.database import get_db
-from app.models.db_models import DirectoryRule, MediaFile, VideoFrameSummary
-from app.models.schemas import MediaDetailRead, MediaDirectoryRead, MediaListResponse
+from app.models.db_models import DirectoryRule, MediaFile, VideoFrameSummary, VideoSegmentSummary
+from app.models.schemas import (
+    JobRead,
+    MediaBackgroundContextUpdate,
+    MediaDetailRead,
+    MediaDirectoryRead,
+    MediaListResponse,
+)
 from app.services.job_service import create_job
 from app.services.media_visibility import is_media_visible, visible_media_filter
 
@@ -106,6 +112,29 @@ def get_media(media_id: uuid.UUID, db: Session = Depends(get_db)) -> MediaFile:
     return media
 
 
+@router.put("/{media_id}/background-context", response_model=MediaDetailRead)
+def update_media_background_context(
+    media_id: uuid.UUID,
+    payload: MediaBackgroundContextUpdate,
+    db: Session = Depends(get_db),
+) -> MediaFile:
+    media = db.get(MediaFile, media_id)
+    if media is None:
+        raise HTTPException(status_code=404, detail="Media not found")
+
+    next_background_context = _clean_optional_text(payload.background_context)
+    changed = (media.background_context or None) != next_background_context
+    media.background_context = next_background_context
+    if changed and media.status in {"done", "embedding_pending"}:
+        media.status = "needs_reanalysis"
+        media.error_message = (
+            "Media background prompt changed; previous analysis is retained until reanalysis runs"
+        )
+    db.add(media)
+    db.commit()
+    return get_media(media_id, db)
+
+
 @router.get("/{media_id}/thumbnail")
 def get_thumbnail(media_id: uuid.UUID, db: Session = Depends(get_db)) -> FileResponse:
     media = db.get(MediaFile, media_id)
@@ -150,11 +179,31 @@ def get_preview(media_id: uuid.UUID, db: Session = Depends(get_db)) -> FileRespo
 
 
 @router.post("/{media_id}/reanalyze")
-def reanalyze(media_id: uuid.UUID, db: Session = Depends(get_db)):
+def reanalyze(media_id: uuid.UUID, db: Session = Depends(get_db)) -> JobRead:
     media = db.get(MediaFile, media_id)
     if media is None:
         raise HTTPException(status_code=404, detail="Media not found")
     return create_job(db, job_type="reanalyze_media", target_id=media.id, target_path=media.path)
+
+
+@router.post("/{media_id}/reanalyze-final-summary", response_model=JobRead)
+def reanalyze_final_summary(media_id: uuid.UUID, db: Session = Depends(get_db)):
+    media = db.get(MediaFile, media_id)
+    if media is None:
+        raise HTTPException(status_code=404, detail="Media not found")
+    if media.media_type != "video":
+        raise HTTPException(status_code=400, detail="Only video media can regenerate a final summary")
+    segment_count = db.scalar(
+        select(func.count(VideoSegmentSummary.id)).where(VideoSegmentSummary.media_id == media.id)
+    )
+    if not segment_count:
+        raise HTTPException(status_code=400, detail="Video has no segment summaries")
+    return create_job(
+        db,
+        job_type="reanalyze_video_summary",
+        target_id=media.id,
+        target_path=media.path,
+    )
 
 
 @router.post("/{media_id}/open-location")
@@ -188,6 +237,13 @@ def _directory_filter(directory_path: str):
 
 def _escape_like(value: str) -> str:
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _clean_optional_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    text = value.strip()
+    return text or None
 
 
 def _display_parent_path(sample_path: str | None, fallback: str) -> str:

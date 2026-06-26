@@ -1,5 +1,5 @@
 import { apiRequest } from './client';
-import type { MediaDirectory, MediaFile, MediaListResponse } from '../types';
+import type { Job, MediaBackgroundContextPayload, MediaDirectory, MediaFile, MediaListResponse } from '../types';
 
 export function listMedia(params: {
   offset: number;
@@ -29,7 +29,18 @@ export function getMedia(id: string) {
 }
 
 export function reanalyzeMedia(id: string) {
-  return apiRequest(`/api/media/${id}/reanalyze`, { method: 'POST' });
+  return apiRequest<Job>(`/api/media/${id}/reanalyze`, { method: 'POST' });
+}
+
+export function reanalyzeVideoFinalSummary(id: string) {
+  return apiRequest<Job>(`/api/media/${id}/reanalyze-final-summary`, { method: 'POST' });
+}
+
+export function updateMediaBackgroundContext(id: string, payload: MediaBackgroundContextPayload) {
+  return apiRequest<MediaFile>(`/api/media/${id}/background-context`, {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  });
 }
 
 export function openMediaLocation(id: string) {

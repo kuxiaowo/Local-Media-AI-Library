@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import func, or_, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -12,9 +12,16 @@ from app.services.media_visibility import visible_media_filter
 
 router = APIRouter(prefix="/scan", tags=["scan"])
 
-MEDIA_JOB_TYPES = {"extract_metadata", "analyze_image", "generate_embedding", "reanalyze_media"}
+MEDIA_JOB_TYPES = {
+    "extract_metadata",
+    "analyze_image",
+    "analyze_video",
+    "generate_embedding",
+    "reanalyze_media",
+    "reanalyze_video_summary",
+}
 ACTIVE_JOB_STATUSES = {"queued", "running", "failed"}
-QUEUE_MEDIA_STATUSES = {"pending", "metadata_done", "analyzing", "needs_reanalysis", "failed"}
+ANALYSIS_JOB_TYPES = MEDIA_JOB_TYPES - {"generate_embedding"}
 
 
 @router.post("/start", response_model=list[JobRead])
@@ -66,24 +73,31 @@ def get_media_queue(limit: int = 200, db: Session = Depends(get_db)) -> MediaQue
         jobs_by_media.setdefault(job.target_id, []).append(job)
 
     active_media_ids = set(jobs_by_media.keys())
-    queue_filter = MediaFile.status.in_(list(QUEUE_MEDIA_STATUSES))
-    if active_media_ids:
-        queue_filter = or_(MediaFile.id.in_(list(active_media_ids)), queue_filter)
+    if not active_media_ids:
+        return MediaQueueResponse(items=[], total=0)
 
     visibility_filter = visible_media_filter(db)
-    total = db.scalar(select(func.count(MediaFile.id)).where(visibility_filter, queue_filter)) or 0
+    media_filter = MediaFile.id.in_(list(active_media_ids))
     media_files = list(
         db.scalars(
             select(MediaFile)
-            .where(visibility_filter, queue_filter)
+            .where(visibility_filter, media_filter)
             .order_by(MediaFile.updated_at.desc(), MediaFile.created_at.desc())
-            .limit(min(limit, 500))
         ).all()
     )
 
-    items = []
+    current_entries: list[tuple[MediaFile, Job]] = []
     for media in media_files:
-        job = _select_current_job(jobs_by_media.get(media.id, []))
+        current_jobs = _current_jobs_for_media(jobs_by_media.get(media.id, []), media)
+        job = _select_current_job(current_jobs, media)
+        if job is None:
+            continue
+        current_entries.append((media, job))
+
+    total = len(current_entries)
+    page_size = max(0, min(limit, 500))
+    items = []
+    for media, job in current_entries[:page_size]:
         items.append(
             MediaQueueItem(
                 media_id=media.id,
@@ -93,7 +107,10 @@ def get_media_queue(limit: int = 200, db: Session = Depends(get_db)) -> MediaQue
                 job_id=job.id if job else None,
                 job_type=job.job_type if job else None,
                 job_status=job.status if job else None,
-                error_message=(job.error_message if job and job.error_message else media.error_message),
+                job_progress_current=job.progress_current if job else 0,
+                job_progress_total=job.progress_total if job else 0,
+                job_payload=job.payload if job else None,
+                error_message=_current_error_message(job, media),
                 updated_at=media.updated_at,
                 job_created_at=job.created_at if job else None,
                 job_started_at=job.started_at if job else None,
@@ -103,9 +120,31 @@ def get_media_queue(limit: int = 200, db: Session = Depends(get_db)) -> MediaQue
     return MediaQueueResponse(items=items, total=total)
 
 
-def _select_current_job(jobs: list[Job]) -> Job | None:
+def _current_jobs_for_media(jobs: list[Job], media: MediaFile) -> list[Job]:
+    return [job for job in jobs if not _is_superseded_failed_job(job, media)]
+
+
+def _is_superseded_failed_job(job: Job, media: MediaFile) -> bool:
+    if job.status != "failed":
+        return False
+    if media.status == "done":
+        return True
+    if media.status == "embedding_pending" and job.job_type in ANALYSIS_JOB_TYPES:
+        return True
+    return False
+
+
+def _select_current_job(jobs: list[Job], media: MediaFile) -> Job | None:
     if not jobs:
         return None
+    if media.status in {"done", "embedding_pending"}:
+        embedding_jobs = [
+            job
+            for job in jobs
+            if job.job_type == "generate_embedding" and job.status in ACTIVE_JOB_STATUSES
+        ]
+        if embedding_jobs:
+            jobs = embedding_jobs
     status_rank = {"running": 0, "queued": 1, "failed": 2}
 
     def sort_key(job: Job) -> tuple[int, float]:
@@ -113,3 +152,13 @@ def _select_current_job(jobs: list[Job]) -> Job | None:
         return (status_rank.get(job.status, 9), -timestamp.timestamp())
 
     return sorted(jobs, key=sort_key)[0]
+
+
+def _current_error_message(job: Job | None, media: MediaFile) -> str | None:
+    if job is None:
+        return media.error_message
+    if job.error_message:
+        return job.error_message
+    if job.status in {"queued", "running"}:
+        return None
+    return media.error_message

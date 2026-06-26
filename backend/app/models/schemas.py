@@ -19,7 +19,7 @@ class DirectoryRuleBase(BaseModel):
     video_final_summary_prompt: str | None = ""
     video_frame_strategy: Literal["fixed_interval", "scene", "hybrid"] = "hybrid"
     frame_interval_seconds: int = Field(default=5, ge=1)
-    max_frames_per_video: int = Field(default=12, ge=1, le=200)
+    max_frames_per_video: int = Field(default=12, ge=1, le=500)
     video_frame_max_width: int = Field(default=1280, ge=160, le=4096)
     video_frame_max_height: int | None = Field(default=None, ge=160, le=4096)
     video_batch_size: int = Field(default=6, ge=1, le=24)
@@ -44,7 +44,7 @@ class DirectoryRuleUpdate(BaseModel):
     video_final_summary_prompt: str | None = None
     video_frame_strategy: Literal["fixed_interval", "scene", "hybrid"] | None = None
     frame_interval_seconds: int | None = Field(default=None, ge=1)
-    max_frames_per_video: int | None = Field(default=None, ge=1, le=200)
+    max_frames_per_video: int | None = Field(default=None, ge=1, le=500)
     video_frame_max_width: int | None = Field(default=None, ge=160, le=4096)
     video_frame_max_height: int | None = Field(default=None, ge=160, le=4096)
     video_batch_size: int | None = Field(default=None, ge=1, le=24)
@@ -143,6 +143,7 @@ class MediaRead(BaseModel):
     captured_at_confidence: str | None
     file_created_at: datetime | None
     file_modified_at: datetime | None
+    background_context: str | None
     status: str
     error_message: str | None
     thumbnail_path: str | None
@@ -154,6 +155,10 @@ class MediaRead(BaseModel):
 class MediaDetailRead(MediaRead):
     video_frames: list[VideoFrameSummaryRead] = Field(default_factory=list)
     video_segments: list[VideoSegmentSummaryRead] = Field(default_factory=list)
+
+
+class MediaBackgroundContextUpdate(BaseModel):
+    background_context: str | None = ""
 
 
 class MediaListResponse(BaseModel):
@@ -192,6 +197,10 @@ class JobRead(BaseModel):
     finished_at: datetime | None
 
 
+class JobClearResponse(BaseModel):
+    deleted: int
+
+
 class ScanStatusResponse(BaseModel):
     queued: int
     running: int
@@ -211,6 +220,9 @@ class MediaQueueItem(BaseModel):
     job_id: uuid.UUID | None
     job_type: str | None
     job_status: str | None
+    job_progress_current: int
+    job_progress_total: int
+    job_payload: dict | None
     error_message: str | None
     updated_at: datetime
     job_created_at: datetime | None
@@ -224,8 +236,10 @@ class MediaQueueResponse(BaseModel):
 
 class SearchRequest(BaseModel):
     query: str
+    mode: Literal["vector", "ai"] = "vector"
     media_type: Literal["image", "video", "any"] = "any"
     directory_rule_ids: list[uuid.UUID] = Field(default_factory=list)
+    directory_path: str | None = None
     date_from: datetime | None = None
     date_to: datetime | None = None
     limit: int = Field(default=30, ge=1, le=100)
@@ -254,8 +268,12 @@ class SearchResultItem(BaseModel):
 
 class SearchResponse(BaseModel):
     query: str
+    mode: Literal["vector", "ai"] = "vector"
     parsed_filters: ParsedFilters
     results: list[SearchResultItem]
+    answer: str | None = None
+    ai_model: str | None = None
+    scope_total: int | None = None
 
 
 class OllamaStatusResponse(BaseModel):

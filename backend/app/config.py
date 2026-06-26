@@ -32,6 +32,7 @@ class Settings(BaseSettings):
 
     default_vision_model: str = "qwen2.5vl:7b"
     default_summary_model: str = "qwen3:8b"
+    default_ai_search_model: str = "qwen3:8b"
     default_embedding_model: str = "nomic-embed-text"
     default_embedding_dimensions: int = 768
 

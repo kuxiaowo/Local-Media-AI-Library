@@ -412,7 +412,7 @@ export function LibrarySettingsPage() {
             <NumberField
               label="最大帧数"
               value={form.max_frames_per_video}
-              max={200}
+              max={500}
               onChange={(value) => setForm({ ...form, max_frames_per_video: value })}
             />
             <NumberField

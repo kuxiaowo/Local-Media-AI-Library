@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import re
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
+from app.core.path_utils import normalize_path
 from app.models.db_models import DirectoryRule, EmbeddingProfile, MediaAiSummary, MediaEmbedding, MediaFile
 from app.models.schemas import ParsedFilters, SearchRequest, SearchResponse, SearchResultItem
+from app.services.ai_search_service import search_media_with_ai
 from app.services.media_visibility import visible_media_filter
 from app.services.ollama_client import OllamaClient
 from app.services.search_rerank import RerankInput, final_score
@@ -32,15 +34,18 @@ def parse_query_filters(request: SearchRequest) -> ParsedFilters:
 
 
 async def search_media(db: Session, request: SearchRequest, ollama: OllamaClient) -> SearchResponse:
+    if request.mode == "ai":
+        return await search_media_with_ai(db, request, ollama)
+
     parsed = parse_query_filters(request)
     model_name = _select_embedding_model(db)
     if model_name is None:
-        return SearchResponse(query=request.query, parsed_filters=parsed, results=[])
+        return SearchResponse(query=request.query, mode="vector", parsed_filters=parsed, results=[])
 
     query_vector = await ollama.embed_text(model=model_name, text=parsed.semantic_query)
     profile = db.scalar(select(EmbeddingProfile).where(EmbeddingProfile.model_name == model_name))
     if profile is None:
-        return SearchResponse(query=request.query, parsed_filters=parsed, results=[])
+        return SearchResponse(query=request.query, mode="vector", parsed_filters=parsed, results=[])
 
     stmt = (
         select(MediaFile, MediaAiSummary, MediaEmbedding.embedding)
@@ -60,6 +65,8 @@ async def search_media(db: Session, request: SearchRequest, ollama: OllamaClient
         ).all()
         if roots:
             stmt = stmt.where(MediaFile.root_path.in_(roots))
+    if request.directory_path:
+        stmt = stmt.where(_directory_filter(request.directory_path))
 
     rows = db.execute(stmt).all()
     results: list[tuple[float, SearchResultItem]] = []
@@ -105,6 +112,7 @@ async def search_media(db: Session, request: SearchRequest, ollama: OllamaClient
     results.sort(key=lambda item: item[0], reverse=True)
     return SearchResponse(
         query=request.query,
+        mode="vector",
         parsed_filters=parsed,
         results=[item for _, item in results[: request.limit]],
     )
@@ -127,3 +135,16 @@ def _match_reason(query: str, summary: MediaAiSummary) -> str:
     if summary.short_summary:
         return f"语义上接近：{summary.short_summary[:80]}"
     return f"与查询“{query}”的向量语义相近"
+
+
+def _directory_filter(directory_path: str):
+    normalized = normalize_path(directory_path)
+    return or_(
+        MediaFile.parent_dir == normalized,
+        MediaFile.parent_dir.like(f"{_escape_like(normalized)}/%", escape="\\"),
+        MediaFile.root_path == normalized,
+    )
+
+
+def _escape_like(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")

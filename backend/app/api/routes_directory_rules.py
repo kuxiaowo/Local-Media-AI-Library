@@ -49,7 +49,9 @@ def update_rule(
         setattr(rule, key, value)
     after_hash = rule_config_hash(rule)
     if before_hash != after_hash:
-        affected = db.scalars(select(MediaFile).where(MediaFile.status == "done")).all()
+        affected = db.scalars(
+            select(MediaFile).where(MediaFile.status.in_(("done", "embedding_pending")))
+        ).all()
         for media in affected:
             if path_has_prefix(media.normalized_path, rule.normalized_path):
                 media.status = "needs_reanalysis"

@@ -7,6 +7,7 @@ const tone: Record<string, string> = {
   missing: 'bg-amber-50 text-amber-700 border-amber-200',
   needs_reanalysis: 'bg-violet-50 text-violet-700 border-violet-200',
   metadata_done: 'bg-cyan-50 text-cyan-700 border-cyan-200',
+  embedding_pending: 'bg-teal-50 text-teal-700 border-teal-200',
 };
 
 export function StatusBadge({ status }: { status: string }) {

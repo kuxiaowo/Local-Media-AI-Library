@@ -69,6 +69,8 @@ class MediaFile(Base, TimestampMixin):
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     folder_rule_id: Mapped[uuid.UUID | None] = mapped_column(GUID(), ForeignKey("directory_rules.id"))
     resolved_config_hash: Mapped[str | None] = mapped_column(Text)
+    background_context: Mapped[str | None] = mapped_column(Text)
+    background_context_prompt: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
     error_message: Mapped[str | None] = mapped_column(Text)
     thumbnail_path: Mapped[str | None] = mapped_column(Text)

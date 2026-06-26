@@ -117,6 +117,7 @@ export interface MediaFile {
   captured_at_confidence: string | null;
   file_created_at: string | null;
   file_modified_at: string | null;
+  background_context: string | null;
   status: string;
   error_message: string | null;
   thumbnail_path: string | null;
@@ -132,6 +133,10 @@ export interface MediaListResponse {
   total: number;
   offset: number;
   limit: number;
+}
+
+export interface MediaBackgroundContextPayload {
+  background_context: string | null;
 }
 
 export interface MediaDirectory {
@@ -177,6 +182,9 @@ export interface MediaQueueItem {
   job_id: string | null;
   job_type: string | null;
   job_status: string | null;
+  job_progress_current: number;
+  job_progress_total: number;
+  job_payload: Record<string, unknown> | null;
   error_message: string | null;
   updated_at: string;
   job_created_at: string | null;
@@ -200,6 +208,7 @@ export interface OllamaModels {
 
 export interface RuntimeSettings {
   default_embedding_model: string;
+  default_ai_search_model: string;
   max_image_long_edge: number;
   scan_worker_concurrency: number;
   metadata_worker_concurrency: number;
@@ -227,8 +236,11 @@ export interface SearchResultItem {
   score: number;
 }
 
+export type SearchMode = 'vector' | 'ai';
+
 export interface SearchResponse {
   query: string;
+  mode: SearchMode;
   parsed_filters: {
     media_type: string;
     date_from: string | null;
@@ -236,4 +248,7 @@ export interface SearchResponse {
     semantic_query: string;
   };
   results: SearchResultItem[];
+  answer: string | null;
+  ai_model: string | null;
+  scope_total: number | null;
 }

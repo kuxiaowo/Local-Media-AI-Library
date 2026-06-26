@@ -50,6 +50,9 @@ async def generate_embedding(db: Session, media: MediaFile, ollama: OllamaClient
     existing.embedding = vector
     existing.embedded_text = media.ai_summary.searchable_text
     db.add(existing)
+    media.status = "done"
+    media.error_message = None
+    db.add(media)
     db.commit()
     db.refresh(existing)
     return existing

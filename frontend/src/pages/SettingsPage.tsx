@@ -23,6 +23,7 @@ import type { RuntimeSettings } from '../types';
 
 const emptyRuntimeSettings: RuntimeSettings = {
   default_embedding_model: 'nomic-embed-text',
+  default_ai_search_model: 'qwen3:8b',
   max_image_long_edge: 1280,
   scan_worker_concurrency: 1,
   metadata_worker_concurrency: 6,
@@ -477,7 +478,7 @@ export function SettingsPage() {
         <div className="mb-3">
           <h2 className="text-base font-semibold">运行设置</h2>
           <p className="text-sm text-slate-500">
-            Embedding 模型用于生成和搜索向量；图片最长边控制发给视觉模型的缩放尺寸；后台并发保存后会立即重载 worker 池。
+            Embedding 模型用于生成和搜索向量；AI 搜索模型用于读取媒体摘要并回答自然语言请求；后台并发保存后会立即重载 worker 池。
           </p>
         </div>
         <div className="mb-4 grid gap-4 lg:grid-cols-2">
@@ -490,13 +491,25 @@ export function SettingsPage() {
               onChange={(value) => setRuntimeForm({ ...runtimeForm, default_embedding_model: value })}
             />
             <p className="mt-1 text-xs leading-5 text-slate-500">
-              所有目录共用这个 embedding 模型。更换模型后，已有向量不会自动重算；请到“扫描任务”点击“全部重新生成”，否则搜索只会覆盖已经用新模型生成过向量的媒体。
+              所有目录共用这个 embedding 模型。更换模型后，已有向量不会自动重算；请到目录规则里对需要的目录点击“全部重新生成”，否则搜索只会覆盖已经用新模型生成过向量的媒体。
             </p>
             {embeddingModelChanged && (
               <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
                 你正在更换全局 Embedding 模型。保存后请重新生成媒体向量，否则旧模型生成的向量不会参与新模型搜索。
               </div>
             )}
+          </div>
+          <div>
+            <ModelSelector
+              id="global-ai-search-model-options"
+              label="AI 搜索模型"
+              value={runtimeForm.default_ai_search_model}
+              models={modelOptions}
+              onChange={(value) => setRuntimeForm({ ...runtimeForm, default_ai_search_model: value })}
+            />
+            <p className="mt-1 text-xs leading-5 text-slate-500">
+              AI 检索会把已生成的媒体摘要文本交给这个本地模型，用于总结文件夹、推荐照片和精确重排候选结果。
+            </p>
           </div>
           <div>
             <NumberField

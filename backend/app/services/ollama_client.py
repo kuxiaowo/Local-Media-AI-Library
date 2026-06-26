@@ -34,7 +34,7 @@ class OllamaClient:
         try:
             async with httpx.AsyncClient(timeout=5, trust_env=False) as client:
                 response = await client.get(f"{self.base_url}/api/tags")
-                response.raise_for_status()
+                _raise_for_status_with_body(response)
             return True, None
         except Exception as exc:
             return False, str(exc)
@@ -42,7 +42,7 @@ class OllamaClient:
     async def list_models(self) -> list[str]:
         async with httpx.AsyncClient(timeout=10, trust_env=False) as client:
             response = await client.get(f"{self.base_url}/api/tags")
-            response.raise_for_status()
+            _raise_for_status_with_body(response)
         payload = response.json()
         return sorted(model.get("name", "") for model in payload.get("models", []) if model.get("name"))
 
@@ -143,7 +143,7 @@ class OllamaClient:
                     f"{self.base_url}/api/embeddings",
                     json={"model": model, "prompt": text, "keep_alive": self.settings.ollama_keep_alive},
                 )
-            response.raise_for_status()
+            _raise_for_status_with_body(response)
         payload = response.json()
         if "embeddings" in payload and payload["embeddings"]:
             return [float(v) for v in payload["embeddings"][0]]
@@ -154,14 +154,13 @@ class OllamaClient:
     async def _generate_json(self, payload: dict[str, Any]) -> dict:
         async with httpx.AsyncClient(timeout=self.timeout, trust_env=False) as client:
             response = await client.post(f"{self.base_url}/api/generate", json=payload)
-            response.raise_for_status()
+            _raise_for_status_with_body(response)
         response_payload = response.json()
         text = response_payload.get("response") or response_payload.get("thinking") or ""
         try:
             parsed = _parse_json_object(text)
         except json.JSONDecodeError as exc:
-            preview = text[:500].replace("\n", " ")
-            raise OllamaError(f"Ollama returned invalid JSON: {exc}; raw preview: {preview}") from exc
+            raise OllamaError(f"Ollama returned invalid JSON: {exc}; raw response:\n{text}") from exc
         if not isinstance(parsed, dict):
             raise OllamaError("Ollama JSON response is not an object")
         return parsed
@@ -169,15 +168,14 @@ class OllamaClient:
     async def _generate_chat_json(self, payload: dict[str, Any]) -> dict:
         async with httpx.AsyncClient(timeout=self.timeout, trust_env=False) as client:
             response = await client.post(f"{self.base_url}/api/chat", json=payload)
-            response.raise_for_status()
+            _raise_for_status_with_body(response)
         response_payload = response.json()
         message = response_payload.get("message") or {}
         text = message.get("content") or response_payload.get("response") or response_payload.get("thinking") or ""
         try:
             parsed = _parse_json_object(text)
         except json.JSONDecodeError as exc:
-            preview = text[:500].replace("\n", " ")
-            raise OllamaError(f"Ollama returned invalid JSON: {exc}; raw preview: {preview}") from exc
+            raise OllamaError(f"Ollama returned invalid JSON: {exc}; raw response:\n{text}") from exc
         if not isinstance(parsed, dict):
             raise OllamaError("Ollama JSON response is not an object")
         return parsed
@@ -224,3 +222,14 @@ def _parse_json_object(text: str) -> dict[str, Any]:
             return parsed
 
     raise json.JSONDecodeError("JSON object not found", text, 0)
+
+
+def _raise_for_status_with_body(response: httpx.Response) -> None:
+    try:
+        response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        body = response.text
+        raise OllamaError(
+            f"Ollama returned HTTP {response.status_code} from {response.request.method} "
+            f"{response.request.url}\n{body}"
+        ) from exc

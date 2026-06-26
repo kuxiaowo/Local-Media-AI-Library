@@ -1,9 +1,9 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { ImageOff, Play, RefreshCw, RotateCcw } from 'lucide-react';
+import { ImageOff, Play, RefreshCw, RotateCcw, Trash2 } from 'lucide-react';
 import { API_BASE } from '../api/client';
-import { getMediaQueue, getScanStatus, listJobs, retryJob, startScan } from '../api/scan';
+import { clearJobs, getMediaQueue, getScanStatus, listJobs, retryJob, startScan } from '../api/scan';
 import { StatusBadge } from '../components/StatusBadge';
-import type { Job, MediaQueueItem, ScanMode } from '../types';
+import type { Job, MediaQueueItem } from '../types';
 
 const maintenanceJobTypes = new Set(['cleanup_stale_media']);
 
@@ -25,7 +25,7 @@ export function ScanPage() {
     refetchInterval: 1500,
   });
   const startMutation = useMutation({
-    mutationFn: (mode: ScanMode) => startScan({ mode }),
+    mutationFn: () => startScan({ mode: 'incremental' }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['media-queue'] });
       queryClient.invalidateQueries({ queryKey: ['scan-status'] });
@@ -40,10 +40,20 @@ export function ScanPage() {
       queryClient.invalidateQueries({ queryKey: ['jobs'] });
     },
   });
+  const clearMutation = useMutation({
+    mutationFn: clearJobs,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['media-queue'] });
+      queryClient.invalidateQueries({ queryKey: ['scan-status'] });
+      queryClient.invalidateQueries({ queryKey: ['jobs'] });
+    },
+  });
 
   const status = statusQuery.data;
   const queueItems = mediaQueueQuery.data?.items ?? [];
   const maintenanceJobs = (jobsQuery.data ?? []).filter((job) => maintenanceJobTypes.has(job.job_type));
+  const jobCount =
+    (status?.queued ?? 0) + (status?.running ?? 0) + (status?.failed ?? 0) + (status?.completed ?? 0);
 
   return (
     <div className="space-y-4">
@@ -55,7 +65,7 @@ export function ScanPage() {
         <div className="flex flex-wrap gap-2">
           <button
             className="btn btn-primary"
-            onClick={() => startMutation.mutate('incremental')}
+            onClick={() => startMutation.mutate()}
             disabled={startMutation.isPending}
             title="只发现并处理新文件，不重算已有文件"
           >
@@ -64,12 +74,16 @@ export function ScanPage() {
           </button>
           <button
             className="btn"
-            onClick={() => startMutation.mutate('full')}
-            disabled={startMutation.isPending}
-            title="重新生成已扫描文件的元数据、AI 总结和 embedding"
+            onClick={() => {
+              if (window.confirm('确定去除所有任务？这不会删除媒体文件或分析结果。')) {
+                clearMutation.mutate();
+              }
+            }}
+            disabled={clearMutation.isPending || jobCount === 0}
+            title="清空当前任务队列和任务历史，不删除媒体文件"
           >
-            <RefreshCw className="h-4 w-4" />
-            全部重新生成
+            <Trash2 className="h-4 w-4" />
+            去除所有任务
           </button>
         </div>
       </header>
@@ -80,7 +94,7 @@ export function ScanPage() {
         <Metric label="已完成任务" value={status?.completed ?? 0} />
         <Metric label="失败任务" value={status?.failed ?? 0} />
         <Metric label="媒体总数" value={status?.media_total ?? 0} />
-        <Metric label="已分析" value={status?.media_done ?? 0} />
+        <Metric label="已完成" value={status?.media_done ?? 0} />
         <Metric label="媒体失败" value={status?.media_failed ?? 0} />
         <Metric label="缺失文件" value={status?.media_missing ?? 0} />
       </section>
@@ -88,9 +102,9 @@ export function ScanPage() {
       <section className="panel overflow-hidden">
         <div className="flex items-center justify-between gap-3 border-b border-line px-4 py-3">
           <div>
-            <div className="text-sm font-semibold">照片处理队列</div>
+            <div className="text-sm font-semibold">媒体处理任务</div>
             <div className="mt-1 text-xs text-slate-500">
-              当前共 {mediaQueueQuery.data?.total ?? 0} 张照片等待、处理中、失败或需要重分析
+              当前共 {mediaQueueQuery.data?.total ?? 0} 个媒体任务正在排队、运行或失败待重试
             </div>
           </div>
           <button className="icon-btn" title="刷新队列" onClick={() => mediaQueueQuery.refetch()}>
@@ -105,22 +119,30 @@ export function ScanPage() {
         )}
 
         <div className="overflow-auto">
-          <table className="min-w-full text-left text-sm">
+          <table className="w-full min-w-[1120px] table-fixed text-left text-sm">
+            <colgroup>
+              <col className="w-[38%]" />
+              <col className="w-40" />
+              <col className="w-32" />
+              <col className="w-32" />
+              <col />
+              <col className="w-16" />
+            </colgroup>
             <thead className="border-b border-line bg-panel text-xs uppercase text-slate-500">
               <tr>
-                <th className="px-4 py-2">照片</th>
+                <th className="px-4 py-2">媒体</th>
                 <th className="px-4 py-2">当前阶段</th>
                 <th className="px-4 py-2">队列状态</th>
                 <th className="px-4 py-2">媒体状态</th>
                 <th className="px-4 py-2">错误</th>
-                <th className="px-4 py-2"></th>
+                <th className="px-3 py-2" aria-label="操作"></th>
               </tr>
             </thead>
             <tbody>
               {queueItems.map((item) => (
                 <tr key={item.media_id} className="border-b border-line last:border-0">
-                  <td className="px-4 py-3">
-                    <div className="flex min-w-[260px] items-center gap-3">
+                  <td className="px-4 py-3 align-middle">
+                    <div className="flex min-w-0 items-center gap-3">
                       <div className="h-14 w-14 shrink-0 overflow-hidden rounded-md border border-line bg-slate-100">
                         {item.thumbnail_url ? (
                           <img
@@ -137,19 +159,23 @@ export function ScanPage() {
                       </div>
                       <div className="min-w-0">
                         <div className="truncate font-medium">{fileName(item.path)}</div>
-                        <div className="max-w-xl truncate text-xs text-slate-500">{item.path}</div>
+                        <div className="truncate text-xs text-slate-500">{item.path}</div>
                       </div>
                     </div>
                   </td>
-                  <td className="px-4 py-3 font-medium">{stageLabel(item)}</td>
-                  <td className="px-4 py-3">
+                  <td className="whitespace-normal break-words px-4 py-3 align-middle font-medium text-slate-800">
+                    {stageLabel(item)}
+                  </td>
+                  <td className="px-4 py-3 align-middle">
                     {item.job_status ? <StatusBadge status={item.job_status} /> : '-'}
                   </td>
-                  <td className="px-4 py-3">
+                  <td className="px-4 py-3 align-middle">
                     <StatusBadge status={item.media_status} />
                   </td>
-                  <td className="max-w-md truncate px-4 py-3 text-red-700">{item.error_message}</td>
-                  <td className="px-4 py-3 text-right">
+                  <td className="min-w-0 px-4 py-3 align-middle">
+                    <ExpandableError message={item.error_message} />
+                  </td>
+                  <td className="px-3 py-3 text-right align-middle">
                     {item.job_status === 'failed' && item.job_id && (
                       <button
                         className="icon-btn"
@@ -165,7 +191,7 @@ export function ScanPage() {
               {!mediaQueueQuery.error && queueItems.length === 0 && (
                 <tr>
                   <td className="px-4 py-10 text-center text-sm text-slate-500" colSpan={6}>
-                    当前没有照片在队列中
+                    当前没有媒体处理任务
                   </td>
                 </tr>
               )}
@@ -216,7 +242,9 @@ export function ScanPage() {
                   <td className="px-4 py-3 text-slate-700">{jobProgress(job)}</td>
                   <td className="px-4 py-3 text-slate-700">{jobResult(job)}</td>
                   <td className="px-4 py-3 text-slate-500">{new Date(job.created_at).toLocaleString()}</td>
-                  <td className="max-w-md truncate px-4 py-3 text-red-700">{job.error_message}</td>
+                  <td className="px-4 py-3">
+                    <ExpandableError message={job.error_message} />
+                  </td>
                   <td className="px-4 py-3 text-right">
                     {job.status === 'failed' && (
                       <button
@@ -254,12 +282,55 @@ function Metric({ label, value }: { label: string; value: number }) {
   );
 }
 
+function ExpandableError({ message }: { message: string | null }) {
+  if (!message) {
+    return <span className="text-slate-400">-</span>;
+  }
+
+  const shouldCollapse = message.length > 80 || message.includes('\n');
+  if (!shouldCollapse) {
+    return <span className="block max-w-full break-words text-red-700">{message}</span>;
+  }
+
+  return (
+    <details className="group min-w-0 max-w-full text-red-700">
+      <summary className="flex min-w-0 cursor-pointer list-none items-baseline gap-2">
+        <span className="min-w-0 flex-1 truncate">{message}</span>
+        <span className="shrink-0 text-xs text-red-500 group-open:hidden">展开</span>
+        <span className="hidden shrink-0 text-xs text-red-500 group-open:inline">收起</span>
+      </summary>
+      <pre className="mt-2 max-w-full whitespace-pre-wrap break-words rounded-md border border-red-200 bg-red-50 p-3 font-sans text-xs leading-5">
+        {message}
+      </pre>
+    </details>
+  );
+}
+
 function stageLabel(item: MediaQueueItem) {
+  const stage = typeof item.job_payload?.stage === 'string' ? item.job_payload.stage : null;
   if (item.job_type === 'extract_metadata') {
     return '提取元数据';
   }
   if (item.job_type === 'analyze_image') {
     return 'AI 分析图片';
+  }
+  if (item.job_type === 'analyze_video') {
+    if (stage === 'extract_frames') {
+      return 'AI 分析视频：抽帧';
+    }
+    if (stage === 'analyze_segments') {
+      return `AI 分析视频：分段识别${batchSuffix(item)}`;
+    }
+    if (stage === 'final_summary') {
+      return 'AI 分析视频：生成最终总结';
+    }
+    if (stage === 'queue_embedding') {
+      return 'AI 分析视频：整理结果';
+    }
+    return 'AI 分析视频';
+  }
+  if (item.job_type === 'reanalyze_video_summary') {
+    return '重新生成视频最终总结';
   }
   if (item.job_type === 'generate_embedding') {
     return '生成搜索向量';
@@ -273,6 +344,9 @@ function stageLabel(item: MediaQueueItem) {
   if (item.media_status === 'metadata_done') {
     return '等待 AI 分析';
   }
+  if (item.media_status === 'embedding_pending') {
+    return '等待生成搜索向量';
+  }
   if (item.media_status === 'analyzing') {
     return 'AI 分析图片';
   }
@@ -283,6 +357,13 @@ function stageLabel(item: MediaQueueItem) {
     return '处理失败';
   }
   return '等待处理';
+}
+
+function batchSuffix(item: MediaQueueItem) {
+  if (item.job_progress_total <= 0 || item.job_progress_current <= 0) {
+    return '';
+  }
+  return `（第 ${item.job_progress_current}/${item.job_progress_total} 批）`;
 }
 
 function fileName(path: string) {

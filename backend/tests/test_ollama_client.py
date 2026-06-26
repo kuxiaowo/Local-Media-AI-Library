@@ -2,9 +2,10 @@ import asyncio
 import json
 
 import pytest
+import httpx
 
 from app.services import ollama_client as ollama_client_module
-from app.services.ollama_client import OllamaClient, _parse_json_object
+from app.services.ollama_client import OllamaClient, OllamaError, _parse_json_object, _raise_for_status_with_body
 
 
 def test_parse_plain_json_object() -> None:
@@ -22,6 +23,19 @@ def test_parse_json_object_embedded_in_text() -> None:
 def test_parse_empty_json_response_fails() -> None:
     with pytest.raises(json.JSONDecodeError):
         _parse_json_object("")
+
+
+def test_http_status_error_includes_full_response_body() -> None:
+    request = httpx.Request("POST", "http://localhost:11434/api/generate")
+    body = "model load failed\n" + ("x" * 2000)
+    response = httpx.Response(500, request=request, text=body)
+
+    with pytest.raises(OllamaError) as exc_info:
+        _raise_for_status_with_body(response)
+
+    message = str(exc_info.value)
+    assert "Ollama returned HTTP 500" in message
+    assert body in message
 
 
 def test_generate_vision_json_uses_configured_image_system_prompt(monkeypatch) -> None:

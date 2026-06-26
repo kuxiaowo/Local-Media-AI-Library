@@ -37,7 +37,7 @@ def mark_completed(job: Job) -> None:
 
 def mark_failed(job: Job, error: str) -> None:
     job.status = "failed"
-    job.error_message = error[:4000]
+    job.error_message = error
     job.finished_at = datetime.now(timezone.utc)
 
 

@@ -40,6 +40,7 @@ router = APIRouter(prefix="/settings", tags=["settings"])
 
 class RuntimeSettings(BaseModel):
     default_embedding_model: str = Field(min_length=1)
+    default_ai_search_model: str = Field(min_length=1)
     max_image_long_edge: int = Field(ge=256, le=4096)
     scan_worker_concurrency: int = Field(ge=1, le=8)
     metadata_worker_concurrency: int = Field(ge=1, le=32)
@@ -52,6 +53,14 @@ class RuntimeSettings(BaseModel):
         normalized = value.strip()
         if not normalized:
             raise ValueError("Embedding model is required")
+        return normalized
+
+    @field_validator("default_ai_search_model")
+    @classmethod
+    def normalize_ai_search_model(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("AI search model is required")
         return normalized
 
 
@@ -73,6 +82,7 @@ def defaults() -> dict[str, object]:
     return {
         "default_vision_model": settings.default_vision_model,
         "default_summary_model": settings.default_summary_model,
+        "default_ai_search_model": settings.default_ai_search_model,
         "default_embedding_model": settings.default_embedding_model,
         "default_embedding_dimensions": settings.default_embedding_dimensions,
         "max_image_long_edge": settings.max_image_long_edge,
@@ -84,6 +94,7 @@ def runtime_settings() -> RuntimeSettings:
     settings = get_settings()
     return RuntimeSettings(
         default_embedding_model=settings.default_embedding_model,
+        default_ai_search_model=settings.default_ai_search_model,
         max_image_long_edge=settings.max_image_long_edge,
         scan_worker_concurrency=settings.scan_worker_concurrency,
         metadata_worker_concurrency=settings.metadata_worker_concurrency,
@@ -98,6 +109,7 @@ def update_runtime_settings(payload: RuntimeSettings, request: Request) -> Runti
         Path(".env"),
         {
             "DEFAULT_EMBEDDING_MODEL": payload.default_embedding_model.strip(),
+            "DEFAULT_AI_SEARCH_MODEL": payload.default_ai_search_model.strip(),
             "MAX_IMAGE_LONG_EDGE": str(payload.max_image_long_edge),
             "SCAN_WORKER_CONCURRENCY": str(payload.scan_worker_concurrency),
             "METADATA_WORKER_CONCURRENCY": str(payload.metadata_worker_concurrency),

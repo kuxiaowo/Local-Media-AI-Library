@@ -29,16 +29,6 @@ def test_video_segment_prompt_includes_previous_summary_and_frame_timestamps() -
     assert "ocr_text" not in prompt
 
 
-def test_default_video_segment_prompt_describes_recursive_outputs() -> None:
-    assert "previous_global_summary" in VIDEO_SEGMENT_ANALYSIS_USER_PROMPT
-    assert "current_segment_summary" in VIDEO_SEGMENT_ANALYSIS_USER_PROMPT
-    assert "important_observations" in VIDEO_SEGMENT_ANALYSIS_USER_PROMPT
-    assert "updated_global_summary" in VIDEO_SEGMENT_ANALYSIS_USER_PROMPT
-    assert "uncertain_points" in VIDEO_SEGMENT_ANALYSIS_USER_PROMPT
-    assert "OCR" in VIDEO_SEGMENT_ANALYSIS_USER_PROMPT
-    assert "逐事件列表" in VIDEO_SEGMENT_ANALYSIS_USER_PROMPT
-
-
 def test_video_segment_prompt_uses_directory_prompt_before_default() -> None:
     prompt = build_video_segment_user_prompt(
         previous_global_summary="",
@@ -49,7 +39,13 @@ def test_video_segment_prompt_uses_directory_prompt_before_default() -> None:
 
     assert "directory segment prompt" in prompt
     assert "global segment prompt" not in prompt
-    assert "current_segment_summary" in prompt
+    assert "current_segment_summary" not in prompt
+    assert "输入 JSON" in prompt
+
+
+def test_default_video_segment_prompt_describes_timestamp_format() -> None:
+    assert "timestamp_seconds 是视频内秒数" in VIDEO_SEGMENT_ANALYSIS_USER_PROMPT
+    assert "timestamp 是同一时间的 HH:MM:SS 格式" in VIDEO_SEGMENT_ANALYSIS_USER_PROMPT
 
 
 def test_video_final_summary_prompt_contains_all_segment_summaries() -> None:
@@ -89,14 +85,14 @@ def test_video_final_summary_prompt_contains_all_segment_summaries() -> None:
     assert "ocr_text" not in prompt
 
 
-def test_default_video_final_prompt_describes_structured_outputs() -> None:
-    assert "标题" in VIDEO_FINAL_SUMMARY_USER_PROMPT
-    assert "简短摘要" in VIDEO_FINAL_SUMMARY_USER_PROMPT
-    assert "详细摘要" in VIDEO_FINAL_SUMMARY_USER_PROMPT
-    assert "时间线" in VIDEO_FINAL_SUMMARY_USER_PROMPT
-    assert "整体场景" in VIDEO_FINAL_SUMMARY_USER_PROMPT
-    assert "重要物体" in VIDEO_FINAL_SUMMARY_USER_PROMPT
-    assert "不确定点" in VIDEO_FINAL_SUMMARY_USER_PROMPT
-    assert "搜索关键词" in VIDEO_FINAL_SUMMARY_USER_PROMPT
-    assert "置信度" in VIDEO_FINAL_SUMMARY_USER_PROMPT
-    assert "必须返回字段：title" in VIDEO_FINAL_SUMMARY_USER_PROMPT
+def test_default_video_final_prompt_describes_output_content() -> None:
+    assert "请输出以下内容" in VIDEO_FINAL_SUMMARY_USER_PROMPT
+    assert "视频整体内容" in VIDEO_FINAL_SUMMARY_USER_PROMPT
+    assert "按时间顺序的主要事件" in VIDEO_FINAL_SUMMARY_USER_PROMPT
+    assert "可能需要人工复核的不确定点" in VIDEO_FINAL_SUMMARY_USER_PROMPT
+    assert "输出字段内容要求" in VIDEO_FINAL_SUMMARY_USER_PROMPT
+    assert "short_summary：一到两句话概括视频整体内容" in VIDEO_FINAL_SUMMARY_USER_PROMPT
+    assert "timeline：数组" in VIDEO_FINAL_SUMMARY_USER_PROMPT
+    assert "start_time/end_time 使用 HH:MM:SS" in VIDEO_FINAL_SUMMARY_USER_PROMPT
+    assert "uncertain_points：数组" in VIDEO_FINAL_SUMMARY_USER_PROMPT
+    assert "confidence：high、medium 或 low" in VIDEO_FINAL_SUMMARY_USER_PROMPT

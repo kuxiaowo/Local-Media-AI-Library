@@ -23,6 +23,10 @@ export function listJobs() {
   return apiRequest<Job[]>('/api/jobs');
 }
 
+export function clearJobs() {
+  return apiRequest<{ deleted: number }>('/api/jobs', { method: 'DELETE' });
+}
+
 export function retryJob(id: string) {
   return apiRequest<Job>(`/api/jobs/${id}/retry`, { method: 'POST' });
 }

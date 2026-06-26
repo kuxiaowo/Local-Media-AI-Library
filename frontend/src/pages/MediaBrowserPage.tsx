@@ -164,6 +164,7 @@ export function MediaBrowserPage() {
               <option value="pending">pending</option>
               <option value="metadata_done">metadata_done</option>
               <option value="analyzing">analyzing</option>
+              <option value="embedding_pending">embedding_pending</option>
               <option value="done">done</option>
               <option value="failed">failed</option>
               <option value="missing">missing</option>
