@@ -24,6 +24,7 @@ class RuleLike(Protocol):
     video_frame_max_width: int
     video_frame_max_height: int | None
     video_batch_size: int
+    video_batch_overlap: int
     analysis_detail: str
 
 
@@ -56,6 +57,7 @@ def rule_config_hash(rule: RuleLike) -> str:
         "video_frame_max_width": rule.video_frame_max_width,
         "video_frame_max_height": rule.video_frame_max_height,
         "video_batch_size": rule.video_batch_size,
+        "video_batch_overlap": rule.video_batch_overlap,
         "analysis_detail": rule.analysis_detail,
     }
     encoded = json.dumps(payload, sort_keys=True, ensure_ascii=True).encode("utf-8")

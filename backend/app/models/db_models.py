@@ -39,6 +39,7 @@ class DirectoryRule(Base, TimestampMixin):
     video_frame_max_width: Mapped[int] = mapped_column(Integer, nullable=False, default=1280)
     video_frame_max_height: Mapped[int | None] = mapped_column(Integer)
     video_batch_size: Mapped[int] = mapped_column(Integer, nullable=False, default=6)
+    video_batch_overlap: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     analysis_detail: Mapped[str] = mapped_column(Text, nullable=False, default="normal")
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
@@ -159,12 +160,14 @@ class VideoSegmentSummary(Base):
     end_time_seconds: Mapped[float | None] = mapped_column(Float)
     frame_paths: Mapped[list | dict | None] = mapped_column(JSON)
     current_segment_summary: Mapped[str | None] = mapped_column(Text)
+    important_observations: Mapped[list | dict | None] = mapped_column(JSON)
     current_segment_tags: Mapped[list | dict | None] = mapped_column(JSON)
     important_objects: Mapped[list | dict | None] = mapped_column(JSON)
     ocr_text: Mapped[list | dict | None] = mapped_column(JSON)
     new_objects_or_scenes: Mapped[list | dict | None] = mapped_column(JSON)
     updated_global_summary: Mapped[str | None] = mapped_column(Text)
     updated_timeline: Mapped[list | dict | None] = mapped_column(JSON)
+    uncertain_points: Mapped[list | dict | None] = mapped_column(JSON)
     confidence: Mapped[float | None] = mapped_column(Float)
     raw_json: Mapped[dict | None] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(

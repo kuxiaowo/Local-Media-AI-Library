@@ -47,40 +47,70 @@ def test_normalize_video_summary_fills_required_fields() -> None:
     assert normalized["confidence"] == "medium"
 
 
-def test_normalize_video_segment_analysis_fills_missing_global_summary() -> None:
+def test_normalize_video_segment_analysis_updates_global_summary() -> None:
     normalized = _normalize_video_segment_analysis(
         {
             "current_segment_summary": "当前片段显示桌面操作",
-            "current_segment_tags": "桌面",
+            "important_observations": "桌面上出现书本",
+            "updated_global_summary": "",
+            "uncertain_points": "无法确定人物身份",
+            "current_segment_tags": "操作",
+            "important_objects": "桌面",
+            "new_objects_or_scenes": ["书本"],
             "confidence": 1.4,
+            "events": [{"description": "legacy event"}],
+            "ocr_text": ["legacy ocr"],
         },
         previous_global_summary="前一段内容",
-        previous_timeline=[{"start_time": "00:00:00", "end_time": "00:00:05", "summary": "开场"}],
     )
-    assert normalized["current_segment_tags"] == ["桌面"]
-    assert normalized["updated_global_summary"] == "前一段内容\n当前片段显示桌面操作"
-    assert normalized["updated_timeline"] == [{"start_time": "00:00:00", "end_time": "00:00:05", "summary": "开场"}]
+    assert normalized["current_segment_summary"] == "当前片段显示桌面操作"
+    assert normalized["important_observations"] == ["桌面上出现书本"]
+    assert normalized["updated_global_summary"] == "前一段内容 当前片段显示桌面操作"
+    assert normalized["uncertain_points"] == ["无法确定人物身份"]
+    assert normalized["current_segment_tags"] == ["操作"]
+    assert normalized["important_objects"] == ["桌面"]
+    assert normalized["new_objects_or_scenes"] == ["书本"]
     assert normalized["confidence"] == 1.0
+    assert "events" not in normalized
+    assert "ocr_text" not in normalized
+
+
+def test_normalize_video_segment_analysis_limits_global_summary() -> None:
+    normalized = _normalize_video_segment_analysis(
+        {
+            "current_segment_summary": "当前片段",
+            "updated_global_summary": "很长" * 200,
+            "confidence": 0.5,
+        },
+        previous_global_summary="前文",
+    )
+    assert len(normalized["updated_global_summary"]) <= 250
 
 
 def test_normalize_video_final_summary_falls_back_to_segment_content() -> None:
     segments = [
         VideoSegmentSummary(
             segment_index=1,
+            start_time_seconds=0.0,
+            end_time_seconds=5.0,
             current_segment_summary="first segment shows a desk",
+            important_observations=["desk appears"],
             current_segment_tags=["desk"],
             important_objects=["book"],
-            ocr_text=["hello"],
             new_objects_or_scenes=["office"],
+            uncertain_points=[],
             confidence=0.9,
         ),
         VideoSegmentSummary(
             segment_index=2,
+            start_time_seconds=5.0,
+            end_time_seconds=10.0,
             current_segment_summary="second segment shows a screen",
+            important_observations=["screen appears"],
             current_segment_tags=["screen"],
             important_objects=["monitor"],
-            ocr_text=["world"],
             new_objects_or_scenes=["computer"],
+            uncertain_points=["unclear user action"],
             confidence=0.8,
         ),
     ]
@@ -88,12 +118,17 @@ def test_normalize_video_final_summary_falls_back_to_segment_content() -> None:
     normalized = _normalize_video_final_summary(
         {"title": "", "confidence": "unknown"},
         segments,
-        rolling_global_summary="rolling video summary",
-        rolling_timeline=[{"start_time": "00:00:00", "end_time": "00:00:05", "summary": "first"}],
+        final_global_summary="rolling video summary",
     )
 
     assert normalized["short_summary"] == "rolling video summary"
+    assert normalized["detailed_summary"] == (
+        "[00:00:00 - 00:00:05] first segment shows a desk\n"
+        "[00:00:05 - 00:00:10] second segment shows a screen"
+    )
+    assert normalized["timeline"][0]["summary"] == "first segment shows a desk"
     assert normalized["objects"] == ["book", "monitor"]
     assert normalized["actions"] == ["desk", "screen"]
-    assert normalized["text_visible"] == ["hello", "world"]
+    assert normalized["text_visible"] == []
+    assert normalized["uncertain_points"] == ["unclear user action"]
     assert normalized["confidence"] == "high"

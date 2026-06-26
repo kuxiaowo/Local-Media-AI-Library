@@ -41,6 +41,7 @@ function createDefaultPayload(
     video_frame_max_width: 1280,
     video_frame_max_height: null,
     video_batch_size: 6,
+    video_batch_overlap: 1,
     analysis_detail: 'normal',
     enabled: true,
   };
@@ -139,6 +140,7 @@ export function LibrarySettingsPage() {
       video_frame_max_width: rule.video_frame_max_width,
       video_frame_max_height: rule.video_frame_max_height,
       video_batch_size: rule.video_batch_size,
+      video_batch_overlap: rule.video_batch_overlap,
       analysis_detail: rule.analysis_detail,
       enabled: rule.enabled,
     });
@@ -435,6 +437,13 @@ export function LibrarySettingsPage() {
               max={24}
               onChange={(value) => setForm({ ...form, video_batch_size: value })}
             />
+            <NumberField
+              label="相邻批次重叠帧数"
+              value={form.video_batch_overlap}
+              min={0}
+              max={23}
+              onChange={(value) => setForm({ ...form, video_batch_overlap: value })}
+            />
             <label className="flex items-center gap-2 text-sm">
               <input
                 type="checkbox"
@@ -477,7 +486,7 @@ export function LibrarySettingsPage() {
                 onChange={(event) => setForm({ ...form, video_segment_prompt: event.target.value })}
               />
               <p className="mt-1 text-xs leading-5 text-slate-500">
-                用于每批关键帧识别。系统会额外附加上一批 global summary、timeline、当前帧序号和时间戳，并强制 JSON 输出。
+                用于每批关键帧递推摘要。系统会额外附加上一批全局记忆、当前帧序号和时间戳，并强制返回片段摘要 JSON。
               </p>
             </div>
 

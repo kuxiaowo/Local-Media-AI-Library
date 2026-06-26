@@ -21,6 +21,7 @@ class Rule:
     video_frame_max_width: int = 1280
     video_frame_max_height: int | None = None
     video_batch_size: int = 6
+    video_batch_overlap: int = 1
     analysis_detail: str = "normal"
 
 
@@ -72,7 +73,7 @@ def test_rule_hash_changes_when_video_final_summary_prompt_changes() -> None:
     after = Rule(
         path="D:/Photos",
         normalized_path="d:/photos",
-        video_final_summary_prompt="merge every segment summary carefully",
+        video_final_summary_prompt="merge every segment event carefully",
     )
     assert rule_config_hash(before) != rule_config_hash(after)
 
@@ -86,6 +87,12 @@ def test_rule_hash_changes_when_video_frame_width_changes() -> None:
 def test_rule_hash_changes_when_video_batch_size_changes() -> None:
     before = Rule(path="D:/Photos", normalized_path="d:/photos")
     after = Rule(path="D:/Photos", normalized_path="d:/photos", video_batch_size=3)
+    assert rule_config_hash(before) != rule_config_hash(after)
+
+
+def test_rule_hash_changes_when_video_batch_overlap_changes() -> None:
+    before = Rule(path="D:/Photos", normalized_path="d:/photos")
+    after = Rule(path="D:/Photos", normalized_path="d:/photos", video_batch_overlap=0)
     assert rule_config_hash(before) != rule_config_hash(after)
 
 

@@ -5,26 +5,17 @@ import { getOllamaModels, getOllamaStatus } from '../api/models';
 import {
   cleanupStaleMedia,
   getDefaultAnalysisPrompt,
-  getDefaultAnalysisSystemPrompt,
   getDefaultBackgroundContextPrompt,
-  getDefaultVideoFinalSummarySystemPrompt,
   getDefaultVideoFinalSummaryPrompt,
-  getDefaultVideoSegmentSystemPrompt,
   getDefaultVideoSegmentPrompt,
   getRuntimeSettings,
   resetDefaultAnalysisPrompt,
-  resetDefaultAnalysisSystemPrompt,
   resetDefaultBackgroundContextPrompt,
-  resetDefaultVideoFinalSummarySystemPrompt,
   resetDefaultVideoFinalSummaryPrompt,
-  resetDefaultVideoSegmentSystemPrompt,
   resetDefaultVideoSegmentPrompt,
   updateDefaultAnalysisPrompt,
-  updateDefaultAnalysisSystemPrompt,
   updateDefaultBackgroundContextPrompt,
-  updateDefaultVideoFinalSummarySystemPrompt,
   updateDefaultVideoFinalSummaryPrompt,
-  updateDefaultVideoSegmentSystemPrompt,
   updateDefaultVideoSegmentPrompt,
   updateRuntimeSettings,
 } from '../api/settings';
@@ -65,12 +56,6 @@ const imagePromptBlocksBeforeBackground: ReadOnlyPromptBlock[] = [
 
 const imagePromptBlocksAfterBackground: ReadOnlyPromptBlock[] = [
   {
-    title: '固定追加：输出要求',
-    description: '代码在 user prompt 末尾固定追加，避免目录自定义提示词漏掉 JSON 和中文输出约束。',
-    kind: 'fixed',
-    content: '固定输出要求：必须返回符合指定 schema 的有效 JSON，所有用户可见文本必须使用简体中文。',
-  },
-  {
     title: '动态输入：当前图片',
     description: '图片不会塞进文本 prompt，而是通过 Ollama /api/generate 的 images 数组随同请求发送。',
     kind: 'dynamic',
@@ -89,36 +74,10 @@ const imagePromptBlocksAfterBackground: ReadOnlyPromptBlock[] = [
 
 const segmentPromptBlocks: ReadOnlyPromptBlock[] = [
   {
-    title: '固定追加：批次说明与上下文定义',
-    description: '代码在可编辑 user prompt 后面固定追加，说明当前请求正在处理一个按时间排序的关键帧批次，并解释上一轮上下文的含义。',
-    kind: 'fixed',
-    content: `你正在分析视频中的一个关键帧批次。帧已经按时间顺序排列。
-
-字段含义：
-- previous_global_summary：从视频开头到上一批关键帧为止，已经形成的滚动整体摘要；第一批为空。
-- previous_timeline：从视频开头到上一批关键帧为止，已经形成的滚动时间线；第一批为空数组。
-- current_frame_info：当前批次每张关键帧的图片顺序、全局帧序号和时间戳。
-
-使用规则：
-- previous_global_summary 和 previous_timeline 只用于理解当前片段的前后关系，不能当作当前画面的新证据。
-- current_segment_summary 必须以当前批次图片为事实来源，只描述当前批次能支持的内容。
-- updated_global_summary 和 updated_timeline 是把上一轮上下文与当前片段合并后的新滚动状态，会提供给下一批继续使用。
-
-下面的 JSON 包含此前上下文，以及当前批次每帧的序号和时间戳元数据。`,
-  },
-  {
-    title: '动态注入：上一批上下文与当前帧信息',
-    description: '每个批次运行时生成。第一批 previous_global_summary 为空，后续批次使用上一批的 updated_global_summary。',
+    title: '动态注入：当前帧信息',
+    description: '每个批次运行时生成，只包含当前批次每帧的序号和时间戳。',
     kind: 'dynamic',
     content: `{
-  "previous_global_summary": "<上一批 updated_global_summary；第一批为空字符串>",
-  "previous_timeline": [
-    {
-      "start_time": "00:00:00",
-      "end_time": "00:00:25",
-      "summary": "<上一批已经确认的时间线片段>"
-    }
-  ],
   "current_frame_info": [
     {
       "image_order": 1,
@@ -128,20 +87,6 @@ const segmentPromptBlocks: ReadOnlyPromptBlock[] = [
     }
   ]
 }`,
-  },
-  {
-    title: '固定追加：当前片段和滚动摘要约束',
-    description: '保证模型不要把上一批摘要当成当前画面事实，同时要求继续更新全局摘要和时间线。',
-    kind: 'fixed',
-    content:
-      '只返回严格 JSON。current_segment_summary 必须只描述当前批次关键帧中可见、可判断，或由当前批次连续性支持的内容。不要把 previous_global_summary / previous_timeline 中出现但当前批次没有画面支持的细节写进 current_segment_summary。updated_global_summary 必须描述从视频开头到当前批次为止的整体内容。updated_timeline 必须保留此前时间线，并加入当前片段。',
-  },
-  {
-    title: '固定追加：必须返回字段',
-    description: '字段名必须保持英文，后端按这些字段解析并写入 video_segment_summaries。',
-    kind: 'fixed',
-    content:
-      '必须返回字段：current_segment_summary, current_segment_tags, important_objects, ocr_text, new_objects_or_scenes, updated_global_summary, updated_timeline, confidence.',
   },
   {
     title: '动态追加：目录背景补充',
@@ -167,54 +112,28 @@ const segmentPromptBlocks: ReadOnlyPromptBlock[] = [
 
 const finalSummaryPromptBlocks: ReadOnlyPromptBlock[] = [
   {
-    title: '固定追加：分段结果说明',
-    description: '代码在可编辑 user prompt 后面固定追加，明确最终总结的主要依据是 segments。',
-    kind: 'fixed',
-    content: `下面的 JSON 包含分段级视频识别结果。请以 segments 作为主要信息来源。
-
-rolling_global_summary 是最后一批结束时的滚动整体摘要，rolling_timeline 是最后一批结束时的滚动时间线。它们只能作为快速理解整体脉络的参考，不能替代 segments 中每个片段的具体证据。`,
-  },
-  {
     title: '动态注入：全部 segment 结果',
     description: '所有分段识别完成后生成。这里不会再包含关键帧图片，只包含每段保存下来的文本和结构化结果。',
     kind: 'dynamic',
     content: `{
   "duration_seconds": 123.45,
-  "rolling_global_summary": "<最后一批 updated_global_summary>",
-  "rolling_timeline": [
-    {
-      "start_time": "00:00:00",
-      "end_time": "00:00:25",
-      "summary": "<滚动时间线片段>"
-    }
-  ],
+  "final_global_summary": "<最后一批 updated_global_summary>",
   "segments": [
     {
       "segment_index": 1,
       "start_time_seconds": 0.0,
       "end_time_seconds": 25.0,
-      "current_segment_summary": "<第 1 批片段摘要>",
+      "current_segment_summary": "<当前批次片段描述>",
+      "important_observations": ["<对理解视频有帮助的观察>"],
+      "updated_global_summary": "<截至当前批次的全局记忆>",
+      "uncertain_points": ["<无法确定或需要人工复核的内容>"],
       "current_segment_tags": ["<标签>"],
       "important_objects": ["<重要物体>"],
-      "ocr_text": ["<画面可见文字>"],
       "new_objects_or_scenes": ["<新场景或新物体>"],
       "confidence": 0.82
     }
   ]
 }`,
-  },
-  {
-    title: '固定追加：最终摘要约束',
-    description: '保证最终输出是可解析 JSON。',
-    kind: 'fixed',
-    content: '只返回严格 JSON。timeline 必须覆盖视频中的重要片段。',
-  },
-  {
-    title: '固定追加：必须返回字段',
-    description: '字段名必须保持英文，后端按这些字段写入 media_ai_summaries 并生成搜索文本。',
-    kind: 'fixed',
-    content:
-      '必须返回字段：title, short_summary, detailed_summary, timeline, scene, objects, actions, text_visible, search_keywords, confidence.',
   },
   {
     title: '动态追加：目录背景补充',
@@ -231,12 +150,9 @@ rolling_global_summary 是最后一批结束时的滚动整体摘要，rolling_t
 export function SettingsPage() {
   const queryClient = useQueryClient();
   const [runtimeForm, setRuntimeForm] = useState<RuntimeSettings>(emptyRuntimeSettings);
-  const [defaultSystemPromptForm, setDefaultSystemPromptForm] = useState('');
   const [defaultPromptForm, setDefaultPromptForm] = useState('');
   const [defaultBackgroundPromptForm, setDefaultBackgroundPromptForm] = useState('');
-  const [defaultVideoSegmentSystemPromptForm, setDefaultVideoSegmentSystemPromptForm] = useState('');
   const [defaultVideoSegmentPromptForm, setDefaultVideoSegmentPromptForm] = useState('');
-  const [defaultVideoFinalSystemPromptForm, setDefaultVideoFinalSystemPromptForm] = useState('');
   const [defaultVideoFinalPromptForm, setDefaultVideoFinalPromptForm] = useState('');
   const [imagePromptsOpen, setImagePromptsOpen] = useState(true);
   const [videoPromptsOpen, setVideoPromptsOpen] = useState(true);
@@ -248,25 +164,13 @@ export function SettingsPage() {
     queryKey: ['default-analysis-prompt'],
     queryFn: getDefaultAnalysisPrompt,
   });
-  const defaultSystemPromptQuery = useQuery({
-    queryKey: ['default-analysis-system-prompt'],
-    queryFn: getDefaultAnalysisSystemPrompt,
-  });
   const defaultBackgroundPromptQuery = useQuery({
     queryKey: ['default-background-context-prompt'],
     queryFn: getDefaultBackgroundContextPrompt,
   });
-  const defaultVideoSegmentSystemPromptQuery = useQuery({
-    queryKey: ['default-video-segment-system-prompt'],
-    queryFn: getDefaultVideoSegmentSystemPrompt,
-  });
   const defaultVideoSegmentPromptQuery = useQuery({
     queryKey: ['default-video-segment-prompt'],
     queryFn: getDefaultVideoSegmentPrompt,
-  });
-  const defaultVideoFinalSystemPromptQuery = useQuery({
-    queryKey: ['default-video-final-summary-system-prompt'],
-    queryFn: getDefaultVideoFinalSummarySystemPrompt,
   });
   const defaultVideoFinalPromptQuery = useQuery({
     queryKey: ['default-video-final-summary-prompt'],
@@ -293,20 +197,6 @@ export function SettingsPage() {
       queryClient.invalidateQueries({ queryKey: ['default-analysis-prompt'] });
     },
   });
-  const saveDefaultSystemPromptMutation = useMutation({
-    mutationFn: updateDefaultAnalysisSystemPrompt,
-    onSuccess: (data) => {
-      setDefaultSystemPromptForm(data.prompt);
-      queryClient.invalidateQueries({ queryKey: ['default-analysis-system-prompt'] });
-    },
-  });
-  const resetDefaultSystemPromptMutation = useMutation({
-    mutationFn: resetDefaultAnalysisSystemPrompt,
-    onSuccess: (data) => {
-      setDefaultSystemPromptForm(data.prompt);
-      queryClient.invalidateQueries({ queryKey: ['default-analysis-system-prompt'] });
-    },
-  });
   const saveDefaultBackgroundPromptMutation = useMutation({
     mutationFn: updateDefaultBackgroundContextPrompt,
     onSuccess: (data) => {
@@ -321,20 +211,6 @@ export function SettingsPage() {
       queryClient.invalidateQueries({ queryKey: ['default-background-context-prompt'] });
     },
   });
-  const saveDefaultVideoSegmentSystemPromptMutation = useMutation({
-    mutationFn: updateDefaultVideoSegmentSystemPrompt,
-    onSuccess: (data) => {
-      setDefaultVideoSegmentSystemPromptForm(data.prompt);
-      queryClient.invalidateQueries({ queryKey: ['default-video-segment-system-prompt'] });
-    },
-  });
-  const resetDefaultVideoSegmentSystemPromptMutation = useMutation({
-    mutationFn: resetDefaultVideoSegmentSystemPrompt,
-    onSuccess: (data) => {
-      setDefaultVideoSegmentSystemPromptForm(data.prompt);
-      queryClient.invalidateQueries({ queryKey: ['default-video-segment-system-prompt'] });
-    },
-  });
   const saveDefaultVideoSegmentPromptMutation = useMutation({
     mutationFn: updateDefaultVideoSegmentPrompt,
     onSuccess: (data) => {
@@ -347,20 +223,6 @@ export function SettingsPage() {
     onSuccess: (data) => {
       setDefaultVideoSegmentPromptForm(data.prompt);
       queryClient.invalidateQueries({ queryKey: ['default-video-segment-prompt'] });
-    },
-  });
-  const saveDefaultVideoFinalSystemPromptMutation = useMutation({
-    mutationFn: updateDefaultVideoFinalSummarySystemPrompt,
-    onSuccess: (data) => {
-      setDefaultVideoFinalSystemPromptForm(data.prompt);
-      queryClient.invalidateQueries({ queryKey: ['default-video-final-summary-system-prompt'] });
-    },
-  });
-  const resetDefaultVideoFinalSystemPromptMutation = useMutation({
-    mutationFn: resetDefaultVideoFinalSummarySystemPrompt,
-    onSuccess: (data) => {
-      setDefaultVideoFinalSystemPromptForm(data.prompt);
-      queryClient.invalidateQueries({ queryKey: ['default-video-final-summary-system-prompt'] });
     },
   });
   const saveDefaultVideoFinalPromptMutation = useMutation({
@@ -401,34 +263,16 @@ export function SettingsPage() {
   }, [defaultPromptQuery.data]);
 
   useEffect(() => {
-    if (defaultSystemPromptQuery.data) {
-      setDefaultSystemPromptForm(defaultSystemPromptQuery.data.prompt);
-    }
-  }, [defaultSystemPromptQuery.data]);
-
-  useEffect(() => {
     if (defaultBackgroundPromptQuery.data) {
       setDefaultBackgroundPromptForm(defaultBackgroundPromptQuery.data.prompt);
     }
   }, [defaultBackgroundPromptQuery.data]);
 
   useEffect(() => {
-    if (defaultVideoSegmentSystemPromptQuery.data) {
-      setDefaultVideoSegmentSystemPromptForm(defaultVideoSegmentSystemPromptQuery.data.prompt);
-    }
-  }, [defaultVideoSegmentSystemPromptQuery.data]);
-
-  useEffect(() => {
     if (defaultVideoSegmentPromptQuery.data) {
       setDefaultVideoSegmentPromptForm(defaultVideoSegmentPromptQuery.data.prompt);
     }
   }, [defaultVideoSegmentPromptQuery.data]);
-
-  useEffect(() => {
-    if (defaultVideoFinalSystemPromptQuery.data) {
-      setDefaultVideoFinalSystemPromptForm(defaultVideoFinalSystemPromptQuery.data.prompt);
-    }
-  }, [defaultVideoFinalSystemPromptQuery.data]);
 
   useEffect(() => {
     if (defaultVideoFinalPromptQuery.data) {
@@ -446,29 +290,14 @@ export function SettingsPage() {
     saveDefaultPromptMutation.mutate({ prompt: defaultPromptForm });
   }
 
-  function submitDefaultSystemPrompt(event: FormEvent) {
-    event.preventDefault();
-    saveDefaultSystemPromptMutation.mutate({ prompt: defaultSystemPromptForm });
-  }
-
   function submitDefaultBackgroundPrompt(event: FormEvent) {
     event.preventDefault();
     saveDefaultBackgroundPromptMutation.mutate({ prompt: defaultBackgroundPromptForm });
   }
 
-  function submitDefaultVideoSegmentSystemPrompt(event: FormEvent) {
-    event.preventDefault();
-    saveDefaultVideoSegmentSystemPromptMutation.mutate({ prompt: defaultVideoSegmentSystemPromptForm });
-  }
-
   function submitDefaultVideoSegmentPrompt(event: FormEvent) {
     event.preventDefault();
     saveDefaultVideoSegmentPromptMutation.mutate({ prompt: defaultVideoSegmentPromptForm });
-  }
-
-  function submitDefaultVideoFinalSystemPrompt(event: FormEvent) {
-    event.preventDefault();
-    saveDefaultVideoFinalSystemPromptMutation.mutate({ prompt: defaultVideoFinalSystemPromptForm });
   }
 
   function submitDefaultVideoFinalPrompt(event: FormEvent) {
@@ -495,11 +324,8 @@ export function SettingsPage() {
             modelsQuery.refetch();
             runtimeQuery.refetch();
             defaultPromptQuery.refetch();
-            defaultSystemPromptQuery.refetch();
             defaultBackgroundPromptQuery.refetch();
-            defaultVideoSegmentSystemPromptQuery.refetch();
             defaultVideoSegmentPromptQuery.refetch();
-            defaultVideoFinalSystemPromptQuery.refetch();
             defaultVideoFinalPromptQuery.refetch();
           }}
         >
@@ -577,28 +403,10 @@ export function SettingsPage() {
         onToggle={() => setImagePromptsOpen((current) => !current)}
       >
         <ImagePromptAssemblyCard
-          systemPromptBlock={{
-            title: 'System prompt 可编辑：图片分析系统提示词',
-            description:
-              '通过 Ollama /api/generate 的 system 字段发送，控制图片识别的角色、安全边界、语言和 JSON 基础约束。',
-            value: defaultSystemPromptForm,
-            onChange: setDefaultSystemPromptForm,
-            onSubmit: submitDefaultSystemPrompt,
-            onReset: () => resetDefaultSystemPromptMutation.mutate(),
-            isSaving: saveDefaultSystemPromptMutation.isPending,
-            isResetting: resetDefaultSystemPromptMutation.isPending,
-            error:
-              defaultSystemPromptQuery.error ??
-              saveDefaultSystemPromptMutation.error ??
-              resetDefaultSystemPromptMutation.error,
-            saveSuccess: saveDefaultSystemPromptMutation.isSuccess,
-            resetSuccess: resetDefaultSystemPromptMutation.isSuccess,
-            textareaClassName: 'min-h-48',
-          }}
           imagePromptBlock={{
-            title: 'User prompt 可编辑开头：图片分析提示词',
+            title: 'User prompt：图片分析提示词',
             description:
-              '这段是图片识别 prompt 的主体。目录规则可以覆盖；没有目录覆盖时，会使用这里的默认值。',
+              '完整的图片识别 user prompt。目录规则可以覆盖；没有目录覆盖时，会使用这里的默认值。',
             value: defaultPromptForm,
             onChange: setDefaultPromptForm,
             onSubmit: submitDefaultPrompt,
@@ -620,27 +428,10 @@ export function SettingsPage() {
       >
         <VideoPromptAssemblyCard
           title="分段识别请求拼接"
-          description="每一批关键帧调用视觉模型。上一批滚动摘要只作为背景，当前片段描述必须以当前批次帧为依据。"
-          systemBlock={{
-            title: 'System message：视频分段识别',
-            description: '作为 Ollama /api/chat 的 system message 发送，控制视觉模型的角色、语言和 JSON 约束。',
-            value: defaultVideoSegmentSystemPromptForm,
-            onChange: setDefaultVideoSegmentSystemPromptForm,
-            onSubmit: submitDefaultVideoSegmentSystemPrompt,
-            onReset: () => resetDefaultVideoSegmentSystemPromptMutation.mutate(),
-            isSaving: saveDefaultVideoSegmentSystemPromptMutation.isPending,
-            isResetting: resetDefaultVideoSegmentSystemPromptMutation.isPending,
-            error:
-              defaultVideoSegmentSystemPromptQuery.error ??
-              saveDefaultVideoSegmentSystemPromptMutation.error ??
-              resetDefaultVideoSegmentSystemPromptMutation.error,
-            saveSuccess: saveDefaultVideoSegmentSystemPromptMutation.isSuccess,
-            resetSuccess: resetDefaultVideoSegmentSystemPromptMutation.isSuccess,
-            textareaClassName: 'min-h-48',
-          }}
+          description="每一批关键帧调用视觉模型，只投喂当前批次图片和上一批全局记忆，生成片段摘要与更新后的全局记忆。"
           userBlock={{
-            title: 'User message 可编辑开头：分段识别提示词',
-            description: '这段是 user prompt 的开头。后面的上下文 JSON、字段要求、背景补充由代码按当前视频实时追加。',
+            title: 'User message：分段识别提示词',
+            description: '完整的分段识别 user prompt；批次说明、事件定义和字段要求都在这里编辑。后面只会追加当前帧信息和目录背景。',
             value: defaultVideoSegmentPromptForm,
             onChange: setDefaultVideoSegmentPromptForm,
             onSubmit: submitDefaultVideoSegmentPrompt,
@@ -661,26 +452,9 @@ export function SettingsPage() {
         <VideoPromptAssemblyCard
           title="最终总结请求拼接"
           description="所有 segment 完成后调用总结模型，只投喂文本化的分段结果，不再投喂关键帧图片。"
-          systemBlock={{
-            title: 'System message：视频最终总结',
-            description: '作为 Ollama /api/chat 的 system message 发送，控制总结模型只根据分段结果做最终归并。',
-            value: defaultVideoFinalSystemPromptForm,
-            onChange: setDefaultVideoFinalSystemPromptForm,
-            onSubmit: submitDefaultVideoFinalSystemPrompt,
-            onReset: () => resetDefaultVideoFinalSystemPromptMutation.mutate(),
-            isSaving: saveDefaultVideoFinalSystemPromptMutation.isPending,
-            isResetting: resetDefaultVideoFinalSystemPromptMutation.isPending,
-            error:
-              defaultVideoFinalSystemPromptQuery.error ??
-              saveDefaultVideoFinalSystemPromptMutation.error ??
-              resetDefaultVideoFinalSystemPromptMutation.error,
-            saveSuccess: saveDefaultVideoFinalSystemPromptMutation.isSuccess,
-            resetSuccess: resetDefaultVideoFinalSystemPromptMutation.isSuccess,
-            textareaClassName: 'min-h-48',
-          }}
           userBlock={{
-            title: 'User message 可编辑开头：最终总结提示词',
-            description: '这段是最终总结 user prompt 的开头。后面的 segments JSON 和字段要求由代码生成。',
+            title: 'User message：最终总结提示词',
+            description: '完整的最终总结 user prompt；总结规则和字段要求都在这里编辑。后面只会追加 segments JSON 和目录背景。',
             value: defaultVideoFinalPromptForm,
             onChange: setDefaultVideoFinalPromptForm,
             onSubmit: submitDefaultVideoFinalPrompt,
@@ -908,10 +682,8 @@ type EditablePromptBlockProps = {
 };
 
 function ImagePromptAssemblyCard({
-  systemPromptBlock,
   imagePromptBlock,
 }: {
-  systemPromptBlock: EditablePromptBlockProps;
   imagePromptBlock: EditablePromptBlockProps;
 }) {
   return (
@@ -931,7 +703,6 @@ function ImagePromptAssemblyCard({
       </div>
       <div className="bg-slate-50 px-4 py-4">
         <div className="space-y-3 border-l-2 border-slate-200 pl-4">
-          <EditablePromptBlock {...systemPromptBlock} resetTitle="恢复代码内置的默认图片 system prompt" />
           <EditablePromptBlock {...imagePromptBlock} resetTitle="恢复代码内置的默认图片分析提示词" />
           {imagePromptBlocksBeforeBackground.map((block) => (
             <ReadOnlyPromptBlock key={block.title} block={block} />
@@ -948,13 +719,11 @@ function ImagePromptAssemblyCard({
 function VideoPromptAssemblyCard({
   title,
   description,
-  systemBlock,
   userBlock,
   fixedBlocks,
 }: {
   title: string;
   description: string;
-  systemBlock: EditablePromptBlockProps;
   userBlock: EditablePromptBlockProps;
   fixedBlocks: ReadOnlyPromptBlock[];
 }) {
@@ -973,7 +742,6 @@ function VideoPromptAssemblyCard({
       </div>
       <div className="bg-slate-50 px-4 py-4">
         <div className="space-y-3 border-l-2 border-slate-200 pl-4">
-          <EditablePromptBlock {...systemBlock} />
           <EditablePromptBlock {...userBlock} />
           {fixedBlocks.map((block) => (
             <ReadOnlyPromptBlock key={block.title} block={block} />

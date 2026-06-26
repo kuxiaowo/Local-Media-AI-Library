@@ -17,6 +17,8 @@ from app.services.prompt_settings import (
     get_default_background_context_prompt,
 )
 
+JSON_SYSTEM_PROMPT = "所有用户可见文本使用简体中文。只返回符合 schema 的 JSON，不输出解释。"
+
 
 class OllamaError(RuntimeError):
     pass
@@ -94,7 +96,7 @@ class OllamaClient:
             "messages": [
                 {
                     "role": "system",
-                    "content": system_prompt or "Return only valid JSON matching the requested schema.",
+                    "content": system_prompt or JSON_SYSTEM_PROMPT,
                 },
                 {
                     "role": "user",
@@ -120,7 +122,7 @@ class OllamaClient:
     ) -> dict:
         payload = {
             "model": model,
-            "system": system_prompt or "Return only valid JSON matching the requested schema.",
+            "system": system_prompt or JSON_SYSTEM_PROMPT,
             "prompt": prompt,
             "format": schema,
             "stream": False,

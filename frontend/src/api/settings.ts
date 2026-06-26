@@ -16,23 +16,6 @@ export function getDefaultAnalysisPrompt() {
   return apiRequest<AnalysisPromptSettings>('/api/settings/default-analysis-prompt');
 }
 
-export function getDefaultAnalysisSystemPrompt() {
-  return apiRequest<AnalysisPromptSettings>('/api/settings/default-analysis-system-prompt');
-}
-
-export function updateDefaultAnalysisSystemPrompt(payload: AnalysisPromptSettings) {
-  return apiRequest<AnalysisPromptSettings>('/api/settings/default-analysis-system-prompt', {
-    method: 'PUT',
-    body: JSON.stringify(payload),
-  });
-}
-
-export function resetDefaultAnalysisSystemPrompt() {
-  return apiRequest<AnalysisPromptSettings>('/api/settings/default-analysis-system-prompt/reset', {
-    method: 'POST',
-  });
-}
-
 export function updateDefaultAnalysisPrompt(payload: AnalysisPromptSettings) {
   return apiRequest<AnalysisPromptSettings>('/api/settings/default-analysis-prompt', {
     method: 'PUT',
@@ -67,23 +50,6 @@ export function getDefaultVideoSegmentPrompt() {
   return apiRequest<AnalysisPromptSettings>('/api/settings/default-video-segment-prompt');
 }
 
-export function getDefaultVideoSegmentSystemPrompt() {
-  return apiRequest<AnalysisPromptSettings>('/api/settings/default-video-segment-system-prompt');
-}
-
-export function updateDefaultVideoSegmentSystemPrompt(payload: AnalysisPromptSettings) {
-  return apiRequest<AnalysisPromptSettings>('/api/settings/default-video-segment-system-prompt', {
-    method: 'PUT',
-    body: JSON.stringify(payload),
-  });
-}
-
-export function resetDefaultVideoSegmentSystemPrompt() {
-  return apiRequest<AnalysisPromptSettings>('/api/settings/default-video-segment-system-prompt/reset', {
-    method: 'POST',
-  });
-}
-
 export function updateDefaultVideoSegmentPrompt(payload: AnalysisPromptSettings) {
   return apiRequest<AnalysisPromptSettings>('/api/settings/default-video-segment-prompt', {
     method: 'PUT',
@@ -99,23 +65,6 @@ export function resetDefaultVideoSegmentPrompt() {
 
 export function getDefaultVideoFinalSummaryPrompt() {
   return apiRequest<AnalysisPromptSettings>('/api/settings/default-video-final-summary-prompt');
-}
-
-export function getDefaultVideoFinalSummarySystemPrompt() {
-  return apiRequest<AnalysisPromptSettings>('/api/settings/default-video-final-summary-system-prompt');
-}
-
-export function updateDefaultVideoFinalSummarySystemPrompt(payload: AnalysisPromptSettings) {
-  return apiRequest<AnalysisPromptSettings>('/api/settings/default-video-final-summary-system-prompt', {
-    method: 'PUT',
-    body: JSON.stringify(payload),
-  });
-}
-
-export function resetDefaultVideoFinalSummarySystemPrompt() {
-  return apiRequest<AnalysisPromptSettings>('/api/settings/default-video-final-summary-system-prompt/reset', {
-    method: 'POST',
-  });
 }
 
 export function updateDefaultVideoFinalSummaryPrompt(payload: AnalysisPromptSettings) {

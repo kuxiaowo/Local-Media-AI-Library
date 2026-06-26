@@ -43,6 +43,27 @@ def test_batch_frames_groups_by_batch_size() -> None:
     ]
 
 
+def test_batch_frames_uses_overlap() -> None:
+    frames = [ExtractedFrame(timestamp_seconds=float(index), frame_path=f"frame_{index}.jpg") for index in range(10)]
+    batches = batch_frames(frames, batch_size=4, overlap=1)
+    assert [[frame.frame_path for frame in batch] for batch in batches] == [
+        ["frame_0.jpg", "frame_1.jpg", "frame_2.jpg", "frame_3.jpg"],
+        ["frame_3.jpg", "frame_4.jpg", "frame_5.jpg", "frame_6.jpg"],
+        ["frame_6.jpg", "frame_7.jpg", "frame_8.jpg", "frame_9.jpg"],
+        ["frame_9.jpg"],
+    ]
+
+
+def test_batch_frames_caps_overlap_when_batch_size_is_one() -> None:
+    frames = [ExtractedFrame(timestamp_seconds=float(index), frame_path=f"frame_{index}.jpg") for index in range(3)]
+    batches = batch_frames(frames, batch_size=1, overlap=1)
+    assert [[frame.frame_path for frame in batch] for batch in batches] == [
+        ["frame_0.jpg"],
+        ["frame_1.jpg"],
+        ["frame_2.jpg"],
+    ]
+
+
 def test_build_scale_filter_keeps_ratio_when_height_is_empty() -> None:
     assert build_scale_filter(max_width=1280, max_height=None) == "scale=w='min(iw,1280)':h=-2"
 

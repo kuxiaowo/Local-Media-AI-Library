@@ -17,13 +17,15 @@ from app.prompts.video_analysis import (
 )
 from app.services.ollama_client import OllamaClient
 from app.services.prompt_settings import (
-    get_default_video_final_summary_system_prompt,
     get_default_video_final_summary_prompt,
-    get_default_video_segment_system_prompt,
+    get_default_video_final_summary_system_prompt,
     get_default_video_segment_prompt,
+    get_default_video_segment_system_prompt,
 )
 from app.services.searchable_text import build_searchable_text
 from app.services.video_frame_extractor import ExtractedFrame, batch_frames, extract_video_frames
+
+NO_VIDEO_HISTORY = "暂无历史信息"
 
 
 async def analyze_image(db: Session, media: MediaFile, ollama: OllamaClient) -> MediaAiSummary:
@@ -108,7 +110,11 @@ async def analyze_video(db: Session, media: MediaFile, ollama: OllamaClient) -> 
         duration_seconds=media.duration_seconds,
     )
 
-    frame_batches = batch_frames(frames, rule.video_batch_size)
+    frame_batches = batch_frames(
+        frames,
+        rule.video_batch_size,
+        overlap=getattr(rule, "video_batch_overlap", 1),
+    )
     if not frame_batches:
         raise RuntimeError("No video frames were extracted")
 
@@ -116,17 +122,16 @@ async def analyze_video(db: Session, media: MediaFile, ollama: OllamaClient) -> 
     db.execute(delete(VideoSegmentSummary).where(VideoSegmentSummary.media_id == media.id))
     db.commit()
 
-    previous_global_summary = ""
-    previous_timeline: list[dict] = []
     saved_segments: list[VideoSegmentSummary] = []
     default_video_segment_prompt = get_default_video_segment_prompt()
     default_video_segment_system_prompt = get_default_video_segment_system_prompt()
     default_video_final_summary_prompt = get_default_video_final_summary_prompt()
     default_video_final_summary_system_prompt = get_default_video_final_summary_system_prompt()
 
-    frame_index = 1
+    previous_global_summary = NO_VIDEO_HISTORY
+    frame_indices = {id(frame): index for index, frame in enumerate(frames, start=1)}
     for segment_index, current_batch in enumerate(frame_batches, start=1):
-        frame_infos = _frame_infos(current_batch, start_index=frame_index)
+        frame_infos = _frame_infos(current_batch, frame_indices=frame_indices)
         raw = await ollama.generate_vision_batch_json(
             model=rule.vision_model,
             image_paths=[frame.frame_path for frame in current_batch],
@@ -137,7 +142,6 @@ async def analyze_video(db: Session, media: MediaFile, ollama: OllamaClient) -> 
             ),
             prompt=build_video_segment_user_prompt(
                 previous_global_summary=previous_global_summary,
-                previous_timeline=previous_timeline,
                 frame_infos=frame_infos,
                 background_context=rule.background_context,
                 background_context_prompt=rule.background_context_prompt,
@@ -145,7 +149,7 @@ async def analyze_video(db: Session, media: MediaFile, ollama: OllamaClient) -> 
                 default_segment_prompt=default_video_segment_prompt,
             ),
         )
-        raw = _normalize_video_segment_analysis(raw, previous_global_summary, previous_timeline)
+        raw = _normalize_video_segment_analysis(raw, previous_global_summary)
 
         segment = VideoSegmentSummary(
             media_id=media.id,
@@ -154,12 +158,14 @@ async def analyze_video(db: Session, media: MediaFile, ollama: OllamaClient) -> 
             end_time_seconds=current_batch[-1].timestamp_seconds,
             frame_paths=[frame.frame_path for frame in current_batch],
             current_segment_summary=raw.get("current_segment_summary"),
+            important_observations=raw.get("important_observations") or [],
             current_segment_tags=raw.get("current_segment_tags") or [],
             important_objects=raw.get("important_objects") or [],
-            ocr_text=raw.get("ocr_text") or [],
+            ocr_text=[],
             new_objects_or_scenes=raw.get("new_objects_or_scenes") or [],
             updated_global_summary=raw.get("updated_global_summary"),
-            updated_timeline=raw.get("updated_timeline") or [],
+            updated_timeline=[],
+            uncertain_points=raw.get("uncertain_points") or [],
             confidence=raw.get("confidence"),
             raw_json=raw,
         )
@@ -167,11 +173,12 @@ async def analyze_video(db: Session, media: MediaFile, ollama: OllamaClient) -> 
         db.flush()
 
         for offset, frame in enumerate(current_batch):
+            current_frame_index = frame_indices.get(id(frame), offset + 1)
             db.add(
                 VideoFrameSummary(
                     media_id=media.id,
                     segment_id=segment.id,
-                    frame_index=frame_index + offset,
+                    frame_index=current_frame_index,
                     timestamp_seconds=frame.timestamp_seconds,
                     frame_path=frame.frame_path,
                     model_used=rule.vision_model,
@@ -179,11 +186,11 @@ async def analyze_video(db: Session, media: MediaFile, ollama: OllamaClient) -> 
                     objects=raw.get("important_objects") or [],
                     people=[],
                     actions=raw.get("current_segment_tags") or [],
-                    text_visible=raw.get("ocr_text") or [],
+                    text_visible=[],
                     raw_json={
                         "segment_id": str(segment.id),
                         "segment_index": segment_index,
-                        "frame_index": frame_index + offset,
+                        "frame_index": current_frame_index,
                     },
                 )
             )
@@ -191,10 +198,7 @@ async def analyze_video(db: Session, media: MediaFile, ollama: OllamaClient) -> 
         db.commit()
         db.refresh(segment)
         saved_segments.append(segment)
-
         previous_global_summary = raw.get("updated_global_summary") or previous_global_summary
-        previous_timeline = raw.get("updated_timeline") or previous_timeline
-        frame_index += len(current_batch)
 
     if not saved_segments:
         raise RuntimeError("No video segment analysis was produced")
@@ -205,11 +209,11 @@ async def analyze_video(db: Session, media: MediaFile, ollama: OllamaClient) -> 
         rule=rule,
         ollama=ollama,
         saved_segments=saved_segments,
-        rolling_global_summary=previous_global_summary,
-        rolling_timeline=previous_timeline,
+        final_global_summary=previous_global_summary,
         default_video_final_summary_system_prompt=default_video_final_summary_system_prompt,
         default_video_final_summary_prompt=default_video_final_summary_prompt,
     )
+
 
 async def _finalize_video_summary(
     *,
@@ -218,8 +222,7 @@ async def _finalize_video_summary(
     rule: object,
     ollama: OllamaClient,
     saved_segments: list[VideoSegmentSummary],
-    rolling_global_summary: str,
-    rolling_timeline: list[dict],
+    final_global_summary: str,
     default_video_final_summary_system_prompt: str,
     default_video_final_summary_prompt: str,
 ) -> MediaAiSummary:
@@ -234,15 +237,14 @@ async def _finalize_video_summary(
         prompt=build_video_final_summary_user_prompt(
             duration_seconds=media.duration_seconds,
             segments=segment_payloads,
-            rolling_global_summary=rolling_global_summary,
-            rolling_timeline=rolling_timeline,
+            final_global_summary=final_global_summary,
             background_context=rule.background_context,
             background_context_prompt=rule.background_context_prompt,
             custom_final_prompt=rule.video_final_summary_prompt,
             default_final_prompt=default_video_final_summary_prompt,
         ),
     )
-    raw = _normalize_video_final_summary(raw, saved_segments, rolling_global_summary, rolling_timeline)
+    raw = _normalize_video_final_summary(raw, saved_segments, final_global_summary)
 
     searchable_text = build_searchable_text(
         title=raw.get("title"),
@@ -255,7 +257,7 @@ async def _finalize_video_summary(
         objects=raw.get("objects"),
         people=[],
         actions=raw.get("actions"),
-        text_visible=raw.get("text_visible"),
+        text_visible=[],
         location_guess="unknown",
         mood="unknown",
         search_keywords=raw.get("search_keywords"),
@@ -272,7 +274,7 @@ async def _finalize_video_summary(
     summary.objects = raw.get("objects") or []
     summary.people = []
     summary.actions = raw.get("actions") or []
-    summary.text_visible = raw.get("text_visible") or []
+    summary.text_visible = []
     summary.location_guess = "unknown"
     summary.time_clues = json.dumps(raw.get("timeline") or [], ensure_ascii=False)
     summary.mood = "unknown"
@@ -283,10 +285,10 @@ async def _finalize_video_summary(
         "timeline": raw.get("timeline") or [],
         "vision_model": rule.vision_model,
         "summary_model": rule.summary_model,
-        "rolling_global_summary": rolling_global_summary,
-        "rolling_timeline": rolling_timeline,
+        "final_global_summary": final_global_summary,
         "segment_count": len(saved_segments),
         "segment_summaries": segment_payloads,
+        "uncertain_points": raw.get("uncertain_points") or [],
     }
     summary.confidence = raw.get("confidence")
     db.add(summary)
@@ -373,26 +375,36 @@ def _normalize_video_summary(raw: dict, frames: list[dict]) -> dict:
 def _normalize_video_segment_analysis(
     raw: dict,
     previous_global_summary: str,
-    previous_timeline: list[dict],
 ) -> dict:
     current_segment_summary = _clean_text(raw.get("current_segment_summary"))
     if not current_segment_summary:
-        current_segment_summary = "当前片段未生成明确摘要"
+        current_segment_summary = "当前片段未生成明确描述"
+
+    important_observations = _list_value(raw.get("important_observations"))
+    if not important_observations and current_segment_summary:
+        important_observations = [current_segment_summary]
 
     updated_global_summary = _clean_text(raw.get("updated_global_summary"))
     if not updated_global_summary:
-        updated_global_summary = "\n".join(
-            text for text in (previous_global_summary, current_segment_summary) if text
-        )
+        parts = []
+        if _clean_text(previous_global_summary) and previous_global_summary != NO_VIDEO_HISTORY:
+            parts.append(previous_global_summary)
+        parts.append(current_segment_summary)
+        updated_global_summary = " ".join(parts)
 
+    confidence = _float_between_zero_and_one(raw.get("confidence"))
+    raw.pop("events", None)
+    raw.pop("ocr_text", None)
+    raw.pop("text_visible", None)
+    raw.pop("updated_timeline", None)
     raw["current_segment_summary"] = current_segment_summary
+    raw["important_observations"] = important_observations
+    raw["updated_global_summary"] = _limit_summary_text(updated_global_summary)
+    raw["uncertain_points"] = _list_value(raw.get("uncertain_points"))
     raw["current_segment_tags"] = _list_value(raw.get("current_segment_tags"))
     raw["important_objects"] = _list_value(raw.get("important_objects"))
-    raw["ocr_text"] = _list_value(raw.get("ocr_text"))
     raw["new_objects_or_scenes"] = _list_value(raw.get("new_objects_or_scenes"))
-    raw["updated_global_summary"] = updated_global_summary
-    raw["updated_timeline"] = _timeline_value(raw.get("updated_timeline")) or previous_timeline
-    raw["confidence"] = _float_between_zero_and_one(raw.get("confidence"))
+    raw["confidence"] = confidence if confidence is not None else 0.5
     return raw
 
 
@@ -402,10 +414,12 @@ def _segment_payloads(segments: list[VideoSegmentSummary]) -> list[dict]:
             "segment_index": segment.segment_index,
             "start_time_seconds": segment.start_time_seconds,
             "end_time_seconds": segment.end_time_seconds,
-            "current_segment_summary": segment.current_segment_summary,
+            "current_segment_summary": _clean_text(segment.current_segment_summary),
+            "important_observations": _list_value(segment.important_observations),
+            "updated_global_summary": _clean_text(segment.updated_global_summary),
+            "uncertain_points": _list_value(segment.uncertain_points),
             "current_segment_tags": _list_value(segment.current_segment_tags),
             "important_objects": _list_value(segment.important_objects),
-            "ocr_text": _list_value(segment.ocr_text),
             "new_objects_or_scenes": _list_value(segment.new_objects_or_scenes),
             "confidence": segment.confidence,
         }
@@ -416,15 +430,10 @@ def _segment_payloads(segments: list[VideoSegmentSummary]) -> list[dict]:
 def _normalize_video_final_summary(
     raw: dict,
     segments: list[VideoSegmentSummary],
-    rolling_global_summary: str,
-    rolling_timeline: list[dict],
+    final_global_summary: str,
 ) -> dict:
-    segment_summaries = [
-        _clean_text(segment.current_segment_summary)
-        for segment in segments
-        if _clean_text(segment.current_segment_summary)
-    ]
-    fallback_summary = _clean_text(rolling_global_summary) or "\n".join(segment_summaries)
+    fallback_detail = _join_segment_summaries(segments)
+    fallback_summary = _clean_text(final_global_summary) or fallback_detail
     fallback_title = _title_from_summary(_clean_text(raw.get("short_summary")) or fallback_summary) or "Untitled video"
     segment_objects = _unique_list(
         value
@@ -436,15 +445,15 @@ def _normalize_video_final_summary(
         for segment in segments
         for value in _list_value(segment.current_segment_tags)
     )
-    segment_ocr = _unique_list(
-        value
-        for segment in segments
-        for value in _list_value(segment.ocr_text)
-    )
     segment_scenes = _unique_list(
         value
         for segment in segments
         for value in _list_value(segment.new_objects_or_scenes)
+    )
+    segment_uncertain_points = _unique_list(
+        value
+        for segment in segments
+        for value in _list_value(segment.uncertain_points)
     )
     segment_confidences = [
         float(segment.confidence)
@@ -459,16 +468,17 @@ def _normalize_video_final_summary(
     raw["short_summary"] = _clean_text(raw.get("short_summary")) or fallback_summary or raw["title"]
     raw["detailed_summary"] = (
         _clean_text(raw.get("detailed_summary"))
-        or _join_segment_summaries(segments)
+        or fallback_detail
         or raw["short_summary"]
     )
-    raw["timeline"] = _timeline_value(raw.get("timeline")) or rolling_timeline
+    raw["timeline"] = _timeline_value(raw.get("timeline")) or _segments_to_timeline(segments)
     raw["scene"] = _clean_text(raw.get("scene")) or ", ".join(segment_scenes[:8]) or "video segments"
     raw["objects"] = _list_value(raw.get("objects")) or segment_objects
     raw["actions"] = _list_value(raw.get("actions")) or segment_tags
-    raw["text_visible"] = _list_value(raw.get("text_visible")) or segment_ocr
+    raw["text_visible"] = []
+    raw["uncertain_points"] = _list_value(raw.get("uncertain_points")) or segment_uncertain_points
     raw["search_keywords"] = _list_value(raw.get("search_keywords")) or _unique_list(
-        [raw["title"], *segment_tags, *segment_objects, *segment_scenes, *segment_ocr]
+        [raw["title"], *segment_tags, *segment_objects, *segment_scenes]
     )
     raw["confidence"] = (
         raw.get("confidence")
@@ -483,15 +493,30 @@ def _join_segment_summaries(segments: list[VideoSegmentSummary]) -> str:
     for segment in segments:
         summary = _clean_text(segment.current_segment_summary)
         if summary:
-            parts.append(f"Segment {segment.segment_index}: {summary}")
+            parts.append(
+                f"[{_format_timestamp(segment.start_time_seconds or 0)} - "
+                f"{_format_timestamp(segment.end_time_seconds or segment.start_time_seconds or 0)}] {summary}"
+            )
     return "\n".join(parts)
 
 
-def _frame_infos(frames: list[ExtractedFrame], *, start_index: int) -> list[dict]:
+def _segments_to_timeline(segments: list[VideoSegmentSummary]) -> list[dict]:
+    return [
+        {
+            "start_time": _format_timestamp(segment.start_time_seconds or 0),
+            "end_time": _format_timestamp(segment.end_time_seconds or segment.start_time_seconds or 0),
+            "summary": _clean_text(segment.current_segment_summary),
+        }
+        for segment in segments
+        if _clean_text(segment.current_segment_summary)
+    ]
+
+
+def _frame_infos(frames: list[ExtractedFrame], *, frame_indices: dict[int, int]) -> list[dict]:
     return [
         {
             "image_order": offset + 1,
-            "frame_index": start_index + offset,
+            "frame_index": frame_indices.get(id(frame), offset + 1),
             "timestamp_seconds": frame.timestamp_seconds,
             "timestamp": _format_timestamp(frame.timestamp_seconds),
         }
@@ -524,6 +549,13 @@ def _timeline_value(value: object) -> list[dict]:
     return []
 
 
+def _limit_summary_text(text: str, max_chars: int = 250) -> str:
+    compact = " ".join(_clean_text(text).split())
+    if len(compact) <= max_chars:
+        return compact
+    return compact[: max_chars - 3].rstrip() + "..."
+
+
 def _float_between_zero_and_one(value: object) -> float | None:
     try:
         number = float(value)
@@ -546,7 +578,7 @@ def _clean_text(value: object) -> str:
     if value is None:
         return ""
     text = str(value).strip()
-    if text.lower() in {"", "none", "null", "unknown", "无", "未知"}:
+    if text.lower() in {"", "none", "null", "unknown", "未知"}:
         return ""
     return text
 
@@ -618,7 +650,7 @@ def _merged_list(items: list[dict], key: str) -> list[str]:
     return merged
 
 
-def _unique_list(values: list[str]) -> list[str]:
+def _unique_list(values) -> list[str]:
     result: list[str] = []
     seen: set[str] = set()
     for value in values:
@@ -634,7 +666,7 @@ def _title_from_summary(text: str) -> str:
     text = text.strip().replace("\n", " ")
     if not text:
         return ""
-    for separator in ("。", "，", ",", ".", "；", ";"):
+    for separator in ("。", "；", "，", ",", ".", ";"):
         if separator in text:
             text = text.split(separator, 1)[0]
             break

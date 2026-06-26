@@ -23,6 +23,7 @@ class DirectoryRuleBase(BaseModel):
     video_frame_max_width: int = Field(default=1280, ge=160, le=4096)
     video_frame_max_height: int | None = Field(default=None, ge=160, le=4096)
     video_batch_size: int = Field(default=6, ge=1, le=24)
+    video_batch_overlap: int = Field(default=1, ge=0, le=23)
     analysis_detail: str = "normal"
     enabled: bool = True
 
@@ -47,6 +48,7 @@ class DirectoryRuleUpdate(BaseModel):
     video_frame_max_width: int | None = Field(default=None, ge=160, le=4096)
     video_frame_max_height: int | None = Field(default=None, ge=160, le=4096)
     video_batch_size: int | None = Field(default=None, ge=1, le=24)
+    video_batch_overlap: int | None = Field(default=None, ge=0, le=23)
     analysis_detail: str | None = None
     enabled: bool | None = None
 
@@ -110,12 +112,12 @@ class VideoSegmentSummaryRead(BaseModel):
     end_time_seconds: float | None
     frame_paths: Any
     current_segment_summary: str | None
+    important_observations: Any
     current_segment_tags: Any
     important_objects: Any
-    ocr_text: Any
     new_objects_or_scenes: Any
     updated_global_summary: str | None
-    updated_timeline: Any
+    uncertain_points: Any
     confidence: float | None
     raw_json: Any
     created_at: datetime

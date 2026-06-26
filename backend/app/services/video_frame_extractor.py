@@ -25,10 +25,18 @@ class ExtractedFrame:
     frame_path: str
 
 
-def batch_frames(frames: list[ExtractedFrame], batch_size: int = 6) -> list[list[ExtractedFrame]]:
+def batch_frames(
+    frames: list[ExtractedFrame],
+    batch_size: int = 6,
+    overlap: int = 0,
+) -> list[list[ExtractedFrame]]:
     if batch_size < 1:
         raise ValueError("batch_size must be at least 1")
-    return [frames[index : index + batch_size] for index in range(0, len(frames), batch_size)]
+    if overlap < 0:
+        raise ValueError("overlap must be at least 0")
+    normalized_overlap = min(overlap, batch_size - 1)
+    step = batch_size - normalized_overlap
+    return [frames[index : index + batch_size] for index in range(0, len(frames), step)]
 
 
 def probe_video(video_path: str | Path) -> VideoInfo:

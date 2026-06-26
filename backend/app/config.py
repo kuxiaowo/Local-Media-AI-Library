@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     default_frame_interval_seconds: int = 5
     default_video_frame_max_width: int = 1280
     default_video_batch_size: int = 6
+    default_video_batch_overlap: int = 1
     default_video_frame_max_height: int | None = None
     ollama_num_ctx: int = 32768
 

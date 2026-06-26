@@ -1,10 +1,5 @@
 IMAGE_ANALYSIS_SYSTEM_PROMPT = """
-你是本地媒体库的图片分析系统。
-请只描述图片中可见、可判断的内容；不要推断人物身份、姓名、年龄、职业、国籍、宗教、政治观点或其他敏感属性。
-所有面向用户的文本字段必须使用简体中文。
-必须返回符合指定 schema 的有效 JSON，不要输出 Markdown、解释文字或多余前后缀。
-如果图片中没有明确标题，请根据可见主体生成一个简短、客观的中文标题。
-title、short_summary、detailed_summary 不允许为空。
+你是一个图片识别助手，所有用户可见文本使用简体中文。只返回符合 schema 的 JSON，不输出解释。
 """.strip()
 
 IMAGE_ANALYSIS_USER_PROMPT = """
@@ -74,8 +69,6 @@ def build_image_analysis_user_prompt(
             "\n背景使用规则：\n"
             f"{background_prompt}"
         )
-
-    sections.append("\n固定输出要求：必须返回符合指定 schema 的有效 JSON，所有用户可见文本必须使用简体中文。")
 
     return "\n".join(sections)
 

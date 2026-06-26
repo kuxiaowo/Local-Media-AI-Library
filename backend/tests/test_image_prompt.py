@@ -14,7 +14,7 @@ def test_build_image_analysis_prompt_uses_default_when_empty() -> None:
     assert "search_keywords: string[]" in prompt
     assert "目录背景补充" not in prompt
     assert BACKGROUND_CONTEXT_PROMPT not in prompt
-    assert "固定输出要求" in prompt
+    assert "输出要求" in prompt
 
 
 def test_build_image_analysis_prompt_uses_directory_prompt_as_base() -> None:
@@ -26,7 +26,6 @@ def test_build_image_analysis_prompt_uses_directory_prompt_as_base() -> None:
     assert IMAGE_ANALYSIS_USER_PROMPT not in prompt
     assert "这个目录是活动照片。" in prompt
     assert BACKGROUND_CONTEXT_PROMPT in prompt
-    assert "固定输出要求" in prompt
 
 
 def test_build_image_analysis_prompt_uses_editable_default_prompt() -> None:

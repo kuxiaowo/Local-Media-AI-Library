@@ -18,6 +18,7 @@ class FakeOllama:
         self.vision_models: list[str] = []
         self.vision_prompts: list[str] = []
         self.vision_system_prompts: list[str] = []
+        self.vision_image_paths: list[list[str]] = []
         self.summary_model: str | None = None
         self.summary_prompt: str | None = None
         self.summary_system_prompt: str | None = None
@@ -26,21 +27,16 @@ class FakeOllama:
         self.vision_models.append(kwargs["model"])
         self.vision_prompts.append(kwargs["prompt"])
         self.vision_system_prompts.append(kwargs["system_prompt"])
+        self.vision_image_paths.append(kwargs["image_paths"])
         index = len(self.vision_prompts)
         return {
             "current_segment_summary": f"segment {index} summary",
+            "important_observations": [f"observation-{index}"],
+            "updated_global_summary": f"global after segment {index}",
+            "uncertain_points": [f"uncertain-{index}"] if index == 2 else [],
             "current_segment_tags": [f"tag-{index}"],
             "important_objects": [f"object-{index}"],
-            "ocr_text": [f"ocr-{index}"],
             "new_objects_or_scenes": [f"scene-{index}"],
-            "updated_global_summary": f"global after segment {index}",
-            "updated_timeline": [
-                {
-                    "start_time": "00:00:00",
-                    "end_time": f"00:00:0{index}",
-                    "summary": f"timeline {index}",
-                }
-            ],
             "confidence": 0.8,
         }
 
@@ -58,13 +54,13 @@ class FakeOllama:
             "scene": "final scene",
             "objects": ["object-1", "object-2"],
             "actions": ["tag-1", "tag-2"],
-            "text_visible": ["ocr-1", "ocr-2"],
+            "uncertain_points": ["uncertain-2"],
             "search_keywords": ["final video title", "tag-1"],
             "confidence": "high",
         }
 
 
-def test_analyze_video_uses_summary_model_for_final_summary(monkeypatch, tmp_path: Path) -> None:
+def test_analyze_video_uses_recursive_summary_for_segments(monkeypatch, tmp_path: Path) -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
     Base.metadata.create_all(engine)
     SessionLocal = sessionmaker(bind=engine, future=True)
@@ -73,6 +69,7 @@ def test_analyze_video_uses_summary_model_for_final_summary(monkeypatch, tmp_pat
         return [
             ExtractedFrame(timestamp_seconds=0.0, frame_path=str(tmp_path / "frame-1.jpg")),
             ExtractedFrame(timestamp_seconds=5.0, frame_path=str(tmp_path / "frame-2.jpg")),
+            ExtractedFrame(timestamp_seconds=10.0, frame_path=str(tmp_path / "frame-3.jpg")),
         ]
 
     monkeypatch.setattr(ai_analyzer, "extract_video_frames", fake_extract_video_frames)
@@ -94,7 +91,8 @@ def test_analyze_video_uses_summary_model_for_final_summary(monkeypatch, tmp_pat
             recursive=True,
             vision_model="vision-model",
             summary_model="summary-model",
-            video_batch_size=1,
+            video_batch_size=2,
+            video_batch_overlap=1,
             video_segment_prompt="directory segment prompt",
             video_final_summary_prompt="directory final prompt",
             video_frame_strategy="fixed_interval",
@@ -123,19 +121,34 @@ def test_analyze_video_uses_summary_model_for_final_summary(monkeypatch, tmp_pat
 
         segments = list(db.scalars(select(VideoSegmentSummary).order_by(VideoSegmentSummary.segment_index)))
 
-    assert fake_ollama.vision_models == ["vision-model", "vision-model"]
+    assert fake_ollama.vision_models == ["vision-model", "vision-model", "vision-model"]
     assert fake_ollama.vision_system_prompts == [
         "global segment system prompt",
         "global segment system prompt",
+        "global segment system prompt",
     ]
+    assert fake_ollama.vision_image_paths == [
+        [str(tmp_path / "frame-1.jpg"), str(tmp_path / "frame-2.jpg")],
+        [str(tmp_path / "frame-2.jpg"), str(tmp_path / "frame-3.jpg")],
+        [str(tmp_path / "frame-3.jpg")],
+    ]
+    assert "暂无历史信息" in fake_ollama.vision_prompts[0]
     assert "global after segment 1" in fake_ollama.vision_prompts[1]
+    assert "segment 1 summary" not in fake_ollama.vision_prompts[1]
+    assert "events" not in fake_ollama.vision_prompts[1]
+    assert "ocr_text" not in fake_ollama.vision_prompts[1]
     assert fake_ollama.summary_model == "summary-model"
     assert fake_ollama.summary_system_prompt == "global final system prompt"
     assert fake_ollama.summary_prompt is not None
     assert "segment 1 summary" in fake_ollama.summary_prompt
     assert "segment 2 summary" in fake_ollama.summary_prompt
-    assert "updated_global_summary" not in fake_ollama.summary_prompt
+    assert "global after segment 3" in fake_ollama.summary_prompt
+    assert "rolling_global_summary" not in fake_ollama.summary_prompt
     assert "updated_timeline" not in fake_ollama.summary_prompt
     assert summary.model_used == "summary-model"
     assert summary.short_summary == "final video summary"
-    assert len(segments) == 2
+    assert summary.text_visible == []
+    assert len(segments) == 3
+    assert segments[0].current_segment_summary == "segment 1 summary"
+    assert segments[1].important_observations == ["observation-2"]
+    assert segments[1].uncertain_points == ["uncertain-2"]

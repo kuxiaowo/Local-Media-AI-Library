@@ -16,6 +16,7 @@ export interface DirectoryRule {
   video_frame_max_width: number;
   video_frame_max_height: number | null;
   video_batch_size: number;
+  video_batch_overlap: number;
   analysis_detail: string;
   enabled: boolean;
   created_at: string;
@@ -38,6 +39,7 @@ export interface DirectoryRulePayload {
   video_frame_max_width: number;
   video_frame_max_height: number | null;
   video_batch_size: number;
+  video_batch_overlap: number;
   analysis_detail: string;
   enabled: boolean;
 }
@@ -86,12 +88,12 @@ export interface VideoSegmentSummary {
   end_time_seconds: number | null;
   frame_paths: unknown;
   current_segment_summary: string | null;
+  important_observations: unknown;
   current_segment_tags: unknown;
   important_objects: unknown;
-  ocr_text: unknown;
   new_objects_or_scenes: unknown;
   updated_global_summary: string | null;
-  updated_timeline: unknown;
+  uncertain_points: unknown;
   confidence: number | null;
   raw_json: unknown;
   created_at: string;

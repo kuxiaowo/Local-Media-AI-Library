@@ -141,8 +141,9 @@ export function MediaDetailPage() {
                     {segment.current_segment_summary ?? '-'}
                   </p>
                   <div className="mt-3 grid gap-3 lg:grid-cols-2">
+                    <TextList title="重要观察" value={segment.important_observations} />
+                    <TextList title="不确定点" value={segment.uncertain_points} />
                     <TextList title="标签" value={segment.current_segment_tags} />
-                    <TextList title="OCR" value={segment.ocr_text} />
                     <TextList title="重要物体/场景" value={segment.important_objects} />
                     <TextList title="新增线索" value={segment.new_objects_or_scenes} />
                   </div>
