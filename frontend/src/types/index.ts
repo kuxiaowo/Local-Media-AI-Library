@@ -44,6 +44,21 @@ export interface DirectoryRulePayload {
   enabled: boolean;
 }
 
+export interface DirectoryRuleDefaults {
+  recursive: boolean;
+  vision_model: string;
+  summary_model: string;
+  video_frame_strategy: 'fixed_interval' | 'scene' | 'hybrid';
+  frame_interval_seconds: number;
+  max_frames_per_video: number;
+  video_frame_max_width: number;
+  video_frame_max_height: number | null;
+  video_batch_size: number;
+  video_batch_overlap: number;
+  analysis_detail: string;
+  enabled: boolean;
+}
+
 export interface MediaSummary {
   model_used: string;
   title: string | null;

@@ -57,7 +57,7 @@ export function MediaGrid({
                 <StatusBadge status={media.status} />
               </div>
               <div className="truncate text-[11px] leading-4 text-slate-400" title={originalFileName}>
-                原始文件名：{originalFileName}
+                {originalFileName}
               </div>
               <div className="text-xs text-slate-500">
                 {media.captured_at ? new Date(media.captured_at).toLocaleString() : '时间未知'}

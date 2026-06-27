@@ -4,22 +4,25 @@ import { Braces, ChevronDown, FileJson, ImageIcon, Lock, Pencil, RefreshCw, Save
 import { getOllamaModels, getOllamaStatus } from '../api/models';
 import {
   cleanupStaleMedia,
+  getDirectoryRuleDefaults,
   getDefaultAnalysisPrompt,
   getDefaultBackgroundContextPrompt,
   getDefaultVideoFinalSummaryPrompt,
   getDefaultVideoSegmentPrompt,
   getRuntimeSettings,
+  resetDirectoryRuleDefaults,
   resetDefaultAnalysisPrompt,
   resetDefaultBackgroundContextPrompt,
   resetDefaultVideoFinalSummaryPrompt,
   resetDefaultVideoSegmentPrompt,
+  updateDirectoryRuleDefaults,
   updateDefaultAnalysisPrompt,
   updateDefaultBackgroundContextPrompt,
   updateDefaultVideoFinalSummaryPrompt,
   updateDefaultVideoSegmentPrompt,
   updateRuntimeSettings,
 } from '../api/settings';
-import type { RuntimeSettings } from '../types';
+import type { DirectoryRuleDefaults, RuntimeSettings } from '../types';
 
 const emptyRuntimeSettings: RuntimeSettings = {
   default_embedding_model: 'nomic-embed-text',
@@ -29,6 +32,21 @@ const emptyRuntimeSettings: RuntimeSettings = {
   metadata_worker_concurrency: 6,
   vision_worker_concurrency: 1,
   embedding_worker_concurrency: 2,
+};
+
+const emptyDirectoryRuleDefaults: DirectoryRuleDefaults = {
+  recursive: true,
+  vision_model: 'qwen2.5vl:7b',
+  summary_model: 'qwen3:8b',
+  video_frame_strategy: 'hybrid',
+  frame_interval_seconds: 5,
+  max_frames_per_video: 12,
+  video_frame_max_width: 1280,
+  video_frame_max_height: null,
+  video_batch_size: 6,
+  video_batch_overlap: 1,
+  analysis_detail: 'normal',
+  enabled: true,
 };
 
 type ReadOnlyPromptBlock = {
@@ -151,6 +169,8 @@ const finalSummaryPromptBlocks: ReadOnlyPromptBlock[] = [
 export function SettingsPage() {
   const queryClient = useQueryClient();
   const [runtimeForm, setRuntimeForm] = useState<RuntimeSettings>(emptyRuntimeSettings);
+  const [directoryDefaultsForm, setDirectoryDefaultsForm] =
+    useState<DirectoryRuleDefaults>(emptyDirectoryRuleDefaults);
   const [defaultPromptForm, setDefaultPromptForm] = useState('');
   const [defaultBackgroundPromptForm, setDefaultBackgroundPromptForm] = useState('');
   const [defaultVideoSegmentPromptForm, setDefaultVideoSegmentPromptForm] = useState('');
@@ -160,6 +180,10 @@ export function SettingsPage() {
   const statusQuery = useQuery({ queryKey: ['ollama-status'], queryFn: getOllamaStatus });
   const modelsQuery = useQuery({ queryKey: ['ollama-models'], queryFn: getOllamaModels });
   const runtimeQuery = useQuery({ queryKey: ['runtime-settings'], queryFn: getRuntimeSettings });
+  const directoryDefaultsQuery = useQuery({
+    queryKey: ['directory-rule-defaults'],
+    queryFn: getDirectoryRuleDefaults,
+  });
   const modelOptions = modelsQuery.data?.models ?? [];
   const defaultPromptQuery = useQuery({
     queryKey: ['default-analysis-prompt'],
@@ -182,6 +206,20 @@ export function SettingsPage() {
     onSuccess: (data) => {
       setRuntimeForm(data);
       queryClient.invalidateQueries({ queryKey: ['runtime-settings'] });
+    },
+  });
+  const saveDirectoryDefaultsMutation = useMutation({
+    mutationFn: updateDirectoryRuleDefaults,
+    onSuccess: (data) => {
+      setDirectoryDefaultsForm(data);
+      queryClient.invalidateQueries({ queryKey: ['directory-rule-defaults'] });
+    },
+  });
+  const resetDirectoryDefaultsMutation = useMutation({
+    mutationFn: resetDirectoryRuleDefaults,
+    onSuccess: (data) => {
+      setDirectoryDefaultsForm(data);
+      queryClient.invalidateQueries({ queryKey: ['directory-rule-defaults'] });
     },
   });
   const saveDefaultPromptMutation = useMutation({
@@ -258,6 +296,12 @@ export function SettingsPage() {
   }, [runtimeQuery.data]);
 
   useEffect(() => {
+    if (directoryDefaultsQuery.data) {
+      setDirectoryDefaultsForm(directoryDefaultsQuery.data);
+    }
+  }, [directoryDefaultsQuery.data]);
+
+  useEffect(() => {
     if (defaultPromptQuery.data) {
       setDefaultPromptForm(defaultPromptQuery.data.prompt);
     }
@@ -284,6 +328,11 @@ export function SettingsPage() {
   function submitRuntime(event: FormEvent) {
     event.preventDefault();
     saveRuntimeMutation.mutate(runtimeForm);
+  }
+
+  function submitDirectoryDefaults(event: FormEvent) {
+    event.preventDefault();
+    saveDirectoryDefaultsMutation.mutate(directoryDefaultsForm);
   }
 
   function submitDefaultPrompt(event: FormEvent) {
@@ -324,6 +373,7 @@ export function SettingsPage() {
             statusQuery.refetch();
             modelsQuery.refetch();
             runtimeQuery.refetch();
+            directoryDefaultsQuery.refetch();
             defaultPromptQuery.refetch();
             defaultBackgroundPromptQuery.refetch();
             defaultVideoSegmentPromptQuery.refetch();
@@ -360,6 +410,174 @@ export function SettingsPage() {
           </div>
         </div>
       </section>
+
+      <form className="panel p-4" onSubmit={submitDirectoryDefaults}>
+        <div className="mb-4">
+          <h2 className="text-base font-semibold">目录规则默认值</h2>
+          <p className="text-sm text-slate-500">
+            新建目录规则时使用这些初始值，保存后立即生效；提示词默认值在下面的提示词区域设置，背景补充在具体目录里填写。
+          </p>
+        </div>
+
+        <div className="grid gap-4 lg:grid-cols-2">
+          <ModelSelector
+            id="directory-default-vision-model-options"
+            label="默认视觉模型"
+            value={directoryDefaultsForm.vision_model}
+            models={modelOptions}
+            onChange={(value) => setDirectoryDefaultsForm({ ...directoryDefaultsForm, vision_model: value })}
+          />
+          <ModelSelector
+            id="directory-default-summary-model-options"
+            label="默认总结模型"
+            value={directoryDefaultsForm.summary_model}
+            models={modelOptions}
+            onChange={(value) => setDirectoryDefaultsForm({ ...directoryDefaultsForm, summary_model: value })}
+          />
+
+          <label>
+            <span className="mb-1 block text-sm font-medium">默认分析细节</span>
+            <input
+              className="control w-full"
+              value={directoryDefaultsForm.analysis_detail}
+              onChange={(event) =>
+                setDirectoryDefaultsForm({ ...directoryDefaultsForm, analysis_detail: event.target.value })
+              }
+              required
+            />
+          </label>
+          <label>
+            <span className="mb-1 block text-sm font-medium">默认抽帧策略</span>
+            <select
+              className="control w-full"
+              value={directoryDefaultsForm.video_frame_strategy}
+              onChange={(event) =>
+                setDirectoryDefaultsForm({
+                  ...directoryDefaultsForm,
+                  video_frame_strategy: event.target.value as DirectoryRuleDefaults['video_frame_strategy'],
+                })
+              }
+            >
+              <option value="hybrid">hybrid</option>
+              <option value="fixed_interval">fixed_interval</option>
+              <option value="scene">scene</option>
+            </select>
+          </label>
+
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={directoryDefaultsForm.recursive}
+              onChange={(event) =>
+                setDirectoryDefaultsForm({ ...directoryDefaultsForm, recursive: event.target.checked })
+              }
+            />
+            默认递归扫描
+          </label>
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={directoryDefaultsForm.enabled}
+              onChange={(event) =>
+                setDirectoryDefaultsForm({ ...directoryDefaultsForm, enabled: event.target.checked })
+              }
+            />
+            默认启用目录
+          </label>
+
+          <NumberField
+            label="默认抽帧间隔秒数"
+            min={1}
+            max={3600}
+            value={directoryDefaultsForm.frame_interval_seconds}
+            onChange={(value) =>
+              setDirectoryDefaultsForm({ ...directoryDefaultsForm, frame_interval_seconds: value })
+            }
+          />
+          <NumberField
+            label="默认最多关键帧数"
+            min={1}
+            max={500}
+            value={directoryDefaultsForm.max_frames_per_video}
+            onChange={(value) =>
+              setDirectoryDefaultsForm({ ...directoryDefaultsForm, max_frames_per_video: value })
+            }
+          />
+          <NumberField
+            label="默认关键帧宽度"
+            min={160}
+            max={4096}
+            value={directoryDefaultsForm.video_frame_max_width}
+            onChange={(value) =>
+              setDirectoryDefaultsForm({ ...directoryDefaultsForm, video_frame_max_width: value })
+            }
+          />
+          <OptionalNumberField
+            label="默认关键帧高度"
+            min={160}
+            max={4096}
+            value={directoryDefaultsForm.video_frame_max_height}
+            placeholder="留空保持比例"
+            onChange={(value) =>
+              setDirectoryDefaultsForm({ ...directoryDefaultsForm, video_frame_max_height: value })
+            }
+          />
+          <NumberField
+            label="默认每批帧数"
+            min={1}
+            max={24}
+            value={directoryDefaultsForm.video_batch_size}
+            onChange={(value) => setDirectoryDefaultsForm({ ...directoryDefaultsForm, video_batch_size: value })}
+          />
+          <NumberField
+            label="默认相邻批次重叠帧数"
+            min={0}
+            max={23}
+            value={directoryDefaultsForm.video_batch_overlap}
+            onChange={(value) =>
+              setDirectoryDefaultsForm({ ...directoryDefaultsForm, video_batch_overlap: value })
+            }
+          />
+        </div>
+
+        {(directoryDefaultsQuery.error ||
+          saveDirectoryDefaultsMutation.error ||
+          resetDirectoryDefaultsMutation.error) && (
+          <div className="mt-4 whitespace-pre-line rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+            {(
+              directoryDefaultsQuery.error ??
+              saveDirectoryDefaultsMutation.error ??
+              resetDirectoryDefaultsMutation.error
+            )?.message}
+          </div>
+        )}
+        {saveDirectoryDefaultsMutation.isSuccess && (
+          <div className="mt-4 rounded-md border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-800">
+            目录规则默认值已保存。
+          </div>
+        )}
+        {resetDirectoryDefaultsMutation.isSuccess && (
+          <div className="mt-4 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+            目录规则默认值已恢复。
+          </div>
+        )}
+
+        <div className="mt-5 flex flex-wrap gap-2">
+          <button className="btn btn-primary" type="submit" disabled={saveDirectoryDefaultsMutation.isPending}>
+            <Save className="h-4 w-4" />
+            保存目录默认值
+          </button>
+          <button
+            className="btn"
+            type="button"
+            disabled={resetDirectoryDefaultsMutation.isPending}
+            onClick={() => resetDirectoryDefaultsMutation.mutate()}
+          >
+            <RefreshCw className="h-4 w-4" />
+            恢复默认
+          </button>
+        </div>
+      </form>
 
       <section className="panel overflow-hidden">
         <div className="border-b border-line bg-white px-4 py-4">
@@ -878,6 +1096,40 @@ function NumberField({
         max={max}
         value={value}
         onChange={(event) => onChange(Number(event.target.value))}
+      />
+    </label>
+  );
+}
+
+function OptionalNumberField({
+  label,
+  min,
+  max,
+  value,
+  placeholder,
+  onChange,
+}: {
+  label: string;
+  min: number;
+  max: number;
+  value: number | null;
+  placeholder?: string;
+  onChange: (value: number | null) => void;
+}) {
+  return (
+    <label>
+      <span className="mb-1 block text-sm font-medium">{label}</span>
+      <input
+        className="control w-full"
+        type="number"
+        min={min}
+        max={max}
+        value={value ?? ''}
+        placeholder={placeholder}
+        onChange={(event) => {
+          const next = event.target.value;
+          onChange(next === '' ? null : Number(next));
+        }}
       />
     </label>
   );

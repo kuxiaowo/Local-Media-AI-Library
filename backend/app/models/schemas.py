@@ -53,6 +53,21 @@ class DirectoryRuleUpdate(BaseModel):
     enabled: bool | None = None
 
 
+class DirectoryRuleDefaults(BaseModel):
+    recursive: bool = True
+    vision_model: str = Field(min_length=1)
+    summary_model: str = Field(min_length=1)
+    video_frame_strategy: Literal["fixed_interval", "scene", "hybrid"] = "hybrid"
+    frame_interval_seconds: int = Field(default=5, ge=1)
+    max_frames_per_video: int = Field(default=12, ge=1, le=500)
+    video_frame_max_width: int = Field(default=1280, ge=160, le=4096)
+    video_frame_max_height: int | None = Field(default=None, ge=160, le=4096)
+    video_batch_size: int = Field(default=6, ge=1, le=24)
+    video_batch_overlap: int = Field(default=1, ge=0, le=23)
+    analysis_detail: str = Field(default="normal", min_length=1)
+    enabled: bool = True
+
+
 class DirectoryRuleRead(DirectoryRuleBase):
     model_config = ConfigDict(from_attributes=True)
 

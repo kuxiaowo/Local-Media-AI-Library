@@ -9,7 +9,12 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.database import get_db
 from app.models.db_models import Job
-from app.models.schemas import JobRead
+from app.models.schemas import DirectoryRuleDefaults, JobRead
+from app.services.directory_defaults import (
+    get_directory_rule_defaults,
+    reset_directory_rule_defaults,
+    update_directory_rule_defaults,
+)
 from app.services.job_service import create_job
 from app.services.prompt_settings import (
     get_default_analysis_prompt,
@@ -123,6 +128,27 @@ def update_runtime_settings(payload: RuntimeSettings, request: Request) -> Runti
     if worker_manager is not None:
         worker_manager.reconfigure_from_settings(settings)
     return runtime_settings()
+
+
+@router.get("/directory-rule-defaults", response_model=DirectoryRuleDefaults)
+def directory_rule_defaults() -> DirectoryRuleDefaults:
+    try:
+        return get_directory_rule_defaults()
+    except ValueError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.put("/directory-rule-defaults", response_model=DirectoryRuleDefaults)
+def save_directory_rule_defaults(payload: DirectoryRuleDefaults) -> DirectoryRuleDefaults:
+    try:
+        return update_directory_rule_defaults(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/directory-rule-defaults/reset", response_model=DirectoryRuleDefaults)
+def reset_directory_defaults() -> DirectoryRuleDefaults:
+    return reset_directory_rule_defaults()
 
 
 @router.get("/default-analysis-prompt", response_model=AnalysisPromptSettings)

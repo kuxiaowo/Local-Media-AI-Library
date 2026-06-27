@@ -1,5 +1,10 @@
-from app.models.db_models import VideoSegmentSummary
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+from app.database import Base
+from app.models.db_models import DirectoryRule, MediaFile, VideoSegmentSummary
 from app.services.ai_analyzer import (
+    _effective_background_context,
     _normalize_image_analysis,
     _normalize_video_final_summary,
     _normalize_video_segment_analysis,
@@ -132,3 +137,61 @@ def test_normalize_video_final_summary_falls_back_to_segment_content() -> None:
     assert normalized["text_visible"] == []
     assert normalized["uncertain_points"] == ["unclear user action"]
     assert normalized["confidence"] == "high"
+
+
+def test_effective_background_context_joins_enabled_ancestor_rules_then_media_context() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
+    Base.metadata.create_all(engine)
+    SessionLocal = sessionmaker(bind=engine, future=True)
+
+    with SessionLocal() as db:
+        root_rule = _directory_rule("F:/Photos", "f:/photos", background_context="root context")
+        child_rule = _directory_rule("F:/Photos/School", "f:/photos/school", background_context="school context")
+        leaf_rule = _directory_rule("F:/Photos/School/Event", "f:/photos/school/event", background_context="event context")
+        disabled_rule = _directory_rule(
+            "F:/Photos/School/Event/Disabled",
+            "f:/photos/school/event/disabled",
+            background_context="disabled context",
+            enabled=False,
+        )
+        media = MediaFile(
+            path="F:/Photos/School/Event/image.jpg",
+            normalized_path="f:/photos/school/event/image.jpg",
+            root_path="f:/photos",
+            parent_dir="f:/photos/school/event",
+            media_type="image",
+            status="metadata_done",
+            folder_rule=leaf_rule,
+            background_context="single media context",
+        )
+        db.add_all([root_rule, child_rule, leaf_rule, disabled_rule, media])
+        db.commit()
+
+        context = _effective_background_context(db, media)
+
+    assert context == "root context\nschool context\nevent context\nsingle media context"
+
+
+def _directory_rule(
+    path: str,
+    normalized_path: str,
+    *,
+    background_context: str | None = None,
+    enabled: bool = True,
+) -> DirectoryRule:
+    return DirectoryRule(
+        path=path,
+        normalized_path=normalized_path,
+        recursive=True,
+        vision_model="vision-model",
+        summary_model="summary-model",
+        background_context=background_context,
+        video_frame_strategy="hybrid",
+        frame_interval_seconds=5,
+        max_frames_per_video=12,
+        video_frame_max_width=1280,
+        video_batch_size=6,
+        video_batch_overlap=1,
+        analysis_detail="normal",
+        enabled=enabled,
+    )

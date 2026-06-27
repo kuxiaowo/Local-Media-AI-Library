@@ -1,5 +1,11 @@
 import { apiRequest } from './client';
-import type { AnalysisPromptSettings, DirectoryPickerResponse, Job, RuntimeSettings } from '../types';
+import type {
+  AnalysisPromptSettings,
+  DirectoryPickerResponse,
+  DirectoryRuleDefaults,
+  Job,
+  RuntimeSettings,
+} from '../types';
 
 export function getRuntimeSettings() {
   return apiRequest<RuntimeSettings>('/api/settings/runtime');
@@ -9,6 +15,23 @@ export function updateRuntimeSettings(payload: RuntimeSettings) {
   return apiRequest<RuntimeSettings>('/api/settings/runtime', {
     method: 'PUT',
     body: JSON.stringify(payload),
+  });
+}
+
+export function getDirectoryRuleDefaults() {
+  return apiRequest<DirectoryRuleDefaults>('/api/settings/directory-rule-defaults');
+}
+
+export function updateDirectoryRuleDefaults(payload: DirectoryRuleDefaults) {
+  return apiRequest<DirectoryRuleDefaults>('/api/settings/directory-rule-defaults', {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function resetDirectoryRuleDefaults() {
+  return apiRequest<DirectoryRuleDefaults>('/api/settings/directory-rule-defaults/reset', {
+    method: 'POST',
   });
 }
 

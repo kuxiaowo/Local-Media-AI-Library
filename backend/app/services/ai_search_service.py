@@ -13,7 +13,7 @@ from app.config import get_settings
 from app.core.path_utils import normalize_path
 from app.models.db_models import DirectoryRule, EmbeddingProfile, MediaAiSummary, MediaEmbedding, MediaFile
 from app.models.schemas import ParsedFilters, SearchRequest, SearchResponse, SearchResultItem
-from app.services.media_visibility import visible_media_filter
+from app.services.media_visibility import effective_enabled_rules, visible_media_filter
 from app.services.ollama_client import OllamaClient
 from app.services.search_rerank import keyword_score
 from app.services.vector_math import cosine_similarity
@@ -528,7 +528,7 @@ def _intent_payload(intent: AiIntent, parsed: ParsedFilters) -> dict[str, Any]:
 
 def _directory_hints(db: Session) -> list[dict[str, str]]:
     hints: list[dict[str, str]] = []
-    for rule in db.scalars(select(DirectoryRule).where(DirectoryRule.enabled)).all():
+    for rule in effective_enabled_rules(list(db.scalars(select(DirectoryRule)).all())):
         hints.append({"name": _directory_name(rule.path), "path": rule.normalized_path, "display_path": rule.path})
 
     rows = db.execute(

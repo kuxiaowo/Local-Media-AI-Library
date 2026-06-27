@@ -27,34 +27,63 @@ import {
   getDefaultBackgroundContextPrompt,
   getDefaultVideoFinalSummaryPrompt,
   getDefaultVideoSegmentPrompt,
+  getDirectoryRuleDefaults,
 } from '../api/settings';
-import type { DirectoryRule, DirectoryRulePayload } from '../types';
+import type { DirectoryRule, DirectoryRuleDefaults, DirectoryRulePayload } from '../types';
+
+const fallbackDirectoryRuleDefaults: DirectoryRuleDefaults = {
+  recursive: true,
+  vision_model: 'qwen2.5vl:7b',
+  summary_model: 'qwen3:8b',
+  video_frame_strategy: 'hybrid',
+  frame_interval_seconds: 5,
+  max_frames_per_video: 12,
+  video_frame_max_width: 1280,
+  video_frame_max_height: null,
+  video_batch_size: 6,
+  video_batch_overlap: 1,
+  analysis_detail: 'normal',
+  enabled: true,
+};
+
+type PromptDefaults = {
+  custom_analysis_prompt?: string;
+  background_context_prompt?: string;
+  video_segment_prompt?: string;
+  video_final_summary_prompt?: string;
+};
+
+type ToggleEnabledVariables = {
+  id: string;
+  enabled: boolean;
+  previousRules?: DirectoryRule[];
+  previousSelectedId: string | null;
+  previousForm: DirectoryRulePayload;
+};
 
 function createDefaultPayload(
-  defaultAnalysisPrompt = '',
-  defaultBackgroundContextPrompt = '',
-  defaultVideoSegmentPrompt = '',
-  defaultVideoFinalSummaryPrompt = '',
+  defaults: DirectoryRuleDefaults = fallbackDirectoryRuleDefaults,
+  prompts: PromptDefaults = {},
 ): DirectoryRulePayload {
   return {
     path: '',
-    recursive: true,
-    vision_model: 'qwen3-vl:8b',
-    summary_model: 'qwen3:8b',
-    custom_analysis_prompt: defaultAnalysisPrompt,
+    recursive: defaults.recursive,
+    vision_model: defaults.vision_model,
+    summary_model: defaults.summary_model,
+    custom_analysis_prompt: prompts.custom_analysis_prompt ?? '',
     background_context: '',
-    background_context_prompt: defaultBackgroundContextPrompt,
-    video_segment_prompt: defaultVideoSegmentPrompt,
-    video_final_summary_prompt: defaultVideoFinalSummaryPrompt,
-    video_frame_strategy: 'hybrid',
-    frame_interval_seconds: 5,
-    max_frames_per_video: 12,
-    video_frame_max_width: 1280,
-    video_frame_max_height: null,
-    video_batch_size: 6,
-    video_batch_overlap: 1,
-    analysis_detail: 'normal',
-    enabled: true,
+    background_context_prompt: prompts.background_context_prompt ?? '',
+    video_segment_prompt: prompts.video_segment_prompt ?? '',
+    video_final_summary_prompt: prompts.video_final_summary_prompt ?? '',
+    video_frame_strategy: defaults.video_frame_strategy,
+    frame_interval_seconds: defaults.frame_interval_seconds,
+    max_frames_per_video: defaults.max_frames_per_video,
+    video_frame_max_width: defaults.video_frame_max_width,
+    video_frame_max_height: defaults.video_frame_max_height,
+    video_batch_size: defaults.video_batch_size,
+    video_batch_overlap: defaults.video_batch_overlap,
+    analysis_detail: defaults.analysis_detail,
+    enabled: defaults.enabled,
   };
 }
 
@@ -72,6 +101,10 @@ export function LibrarySettingsPage() {
   const [appliedSettingsTarget, setAppliedSettingsTarget] = useState<string | null>(null);
   const rulesQuery = useQuery({ queryKey: ['directory-rules'], queryFn: listDirectoryRules });
   const modelsQuery = useQuery({ queryKey: ['ollama-models'], queryFn: getOllamaModels });
+  const directoryDefaultsQuery = useQuery({
+    queryKey: ['directory-rule-defaults'],
+    queryFn: getDirectoryRuleDefaults,
+  });
   const defaultPromptQuery = useQuery({
     queryKey: ['default-analysis-prompt'],
     queryFn: getDefaultAnalysisPrompt,
@@ -89,10 +122,25 @@ export function LibrarySettingsPage() {
     queryFn: getDefaultVideoFinalSummaryPrompt,
   });
   const modelOptions = modelsQuery.data?.models ?? [];
+  const directoryDefaults = directoryDefaultsQuery.data ?? fallbackDirectoryRuleDefaults;
   const defaultAnalysisPrompt = defaultPromptQuery.data?.prompt ?? '';
   const defaultBackgroundContextPrompt = defaultBackgroundPromptQuery.data?.prompt ?? '';
   const defaultVideoSegmentPrompt = defaultVideoSegmentPromptQuery.data?.prompt ?? '';
   const defaultVideoFinalSummaryPrompt = defaultVideoFinalPromptQuery.data?.prompt ?? '';
+  const promptDefaults = useMemo<PromptDefaults>(
+    () => ({
+      custom_analysis_prompt: defaultAnalysisPrompt,
+      background_context_prompt: defaultBackgroundContextPrompt,
+      video_segment_prompt: defaultVideoSegmentPrompt,
+      video_final_summary_prompt: defaultVideoFinalSummaryPrompt,
+    }),
+    [
+      defaultAnalysisPrompt,
+      defaultBackgroundContextPrompt,
+      defaultVideoFinalSummaryPrompt,
+      defaultVideoSegmentPrompt,
+    ],
+  );
   const requestedPath = searchParams.get('path');
   const requestedNormalizedPath = searchParams.get('normalized_path');
   const settingsTargetKey = `${requestedNormalizedPath ?? ''}|${requestedPath ?? ''}`;
@@ -150,14 +198,7 @@ export function LibrarySettingsPage() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['directory-rules'] });
       setSelectedId(null);
-      setForm(
-        createDefaultPayload(
-          defaultAnalysisPrompt,
-          defaultBackgroundContextPrompt,
-          defaultVideoSegmentPrompt,
-          defaultVideoFinalSummaryPrompt,
-        ),
-      );
+      setForm(createDefaultPayload(directoryDefaults, promptDefaults));
     },
   });
 
@@ -182,28 +223,33 @@ export function LibrarySettingsPage() {
     },
   });
   const toggleEnabledMutation = useMutation({
-    mutationFn: ({ id, enabled }: { id: string; enabled: boolean; previousEnabled: boolean }) =>
+    mutationFn: ({ id, enabled }: ToggleEnabledVariables) =>
       updateDirectoryRule(id, { enabled }),
     onError: (_error, variables) => {
-      queryClient.setQueryData<DirectoryRule[]>(['directory-rules'], (rules) =>
-        rules?.map((rule) =>
-          rule.id === variables.id ? { ...rule, enabled: variables.previousEnabled } : rule,
-        ),
-      );
-      if (selectedId === variables.id) {
-        setForm((current) => ({ ...current, enabled: variables.previousEnabled }));
+      if (variables.previousRules) {
+        queryClient.setQueryData<DirectoryRule[]>(['directory-rules'], variables.previousRules);
       }
+      setSelectedId(variables.previousSelectedId);
+      setForm(variables.previousForm);
     },
     onSuccess: (updatedRule) => {
       queryClient.setQueryData<DirectoryRule[]>(['directory-rules'], (rules) =>
-        rules?.map((rule) => (rule.id === updatedRule.id ? updatedRule : rule)),
+        rules?.map((rule) => {
+          if (rule.id === updatedRule.id) {
+            return updatedRule;
+          }
+          if (!updatedRule.enabled && directoryRuleIsDescendant(rule, updatedRule)) {
+            return { ...rule, enabled: false };
+          }
+          return rule;
+        }),
       );
       if (selectedId === updatedRule.id) {
         setForm((current) => ({ ...current, enabled: updatedRule.enabled }));
       }
     },
     onSettled: () => {
-      queryClient.invalidateQueries({ queryKey: ['directory-rules'] });
+      invalidateProcessingQueries();
     },
   });
 
@@ -232,7 +278,12 @@ export function LibrarySettingsPage() {
   }
 
   useEffect(() => {
-    if (!rulesQuery.data || settingsTargetKey === '|' || appliedSettingsTarget === settingsTargetKey) {
+    if (
+      !rulesQuery.data ||
+      !directoryDefaultsQuery.data ||
+      settingsTargetKey === '|' ||
+      appliedSettingsTarget === settingsTargetKey
+    ) {
       return;
     }
 
@@ -248,22 +299,16 @@ export function LibrarySettingsPage() {
     } else if (requestedPath) {
       setSelectedId(null);
       setForm({
-        ...createDefaultPayload(
-          defaultAnalysisPrompt,
-          defaultBackgroundContextPrompt,
-          defaultVideoSegmentPrompt,
-          defaultVideoFinalSummaryPrompt,
-        ),
+        ...createDefaultPayload(directoryDefaults, promptDefaults),
         path: normalizeDisplayPath(requestedPath),
       });
     }
     setAppliedSettingsTarget(settingsTargetKey);
   }, [
     appliedSettingsTarget,
-    defaultBackgroundContextPrompt,
-    defaultAnalysisPrompt,
-    defaultVideoFinalSummaryPrompt,
-    defaultVideoSegmentPrompt,
+    directoryDefaults,
+    directoryDefaultsQuery.data,
+    promptDefaults,
     requestedNormalizedPath,
     requestedPath,
     rulesQuery.data,
@@ -316,13 +361,27 @@ export function LibrarySettingsPage() {
   }
 
   function toggleRuleEnabled(rule: DirectoryRule, enabled: boolean) {
-    if (selectedId === rule.id) {
+    const previousRules = queryClient.getQueryData<DirectoryRule[]>(['directory-rules']);
+    const previousSelectedId = selectedId;
+    const previousForm = form;
+    const selectedRule = previousRules?.find((item) => item.id === selectedId) ?? null;
+    if (!enabled && selectedRule && selectedRule.id !== rule.id && directoryRuleIsDescendant(selectedRule, rule)) {
+      selectRule({ ...rule, enabled });
+    } else if (selectedId === rule.id) {
       setForm((current) => ({ ...current, enabled }));
     }
     queryClient.setQueryData<DirectoryRule[]>(['directory-rules'], (rules) =>
-      rules?.map((item) => (item.id === rule.id ? { ...item, enabled } : item)),
+      rules?.map((item) => {
+        if (item.id === rule.id) {
+          return { ...item, enabled };
+        }
+        if (!enabled && directoryRuleIsDescendant(item, rule)) {
+          return { ...item, enabled: false };
+        }
+        return item;
+      }),
     );
-    toggleEnabledMutation.mutate({ id: rule.id, enabled, previousEnabled: rule.enabled });
+    toggleEnabledMutation.mutate({ id: rule.id, enabled, previousRules, previousSelectedId, previousForm });
   }
 
   return (
@@ -336,14 +395,7 @@ export function LibrarySettingsPage() {
           className="btn"
           onClick={() => {
             setSelectedId(null);
-            setForm(
-              createDefaultPayload(
-                defaultAnalysisPrompt,
-                defaultBackgroundContextPrompt,
-                defaultVideoSegmentPrompt,
-                defaultVideoFinalSummaryPrompt,
-              ),
-            );
+            setForm(createDefaultPayload(directoryDefaults, promptDefaults));
           }}
           title="新增目录规则"
         >
@@ -619,9 +671,14 @@ export function LibrarySettingsPage() {
               无法读取 Ollama 模型列表，仍可手动输入模型名：{modelsQuery.error.message}
             </div>
           )}
+          {directoryDefaultsQuery.error && (
+            <div className="mt-4 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+              无法读取目录默认设置：{directoryDefaultsQuery.error.message}
+            </div>
+          )}
           {defaultPromptQuery.error && (
             <div className="mt-4 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
-              无法读取默认提示词：{defaultPromptQuery.error.message}
+              无法读取默认图片分析提示词：{defaultPromptQuery.error.message}
             </div>
           )}
           {defaultBackgroundPromptQuery.error && (
@@ -770,7 +827,8 @@ function DirectoryRuleTreeItem({
   onToggleEnabled: (rule: DirectoryRule, enabled: boolean) => void;
 }) {
   const selected = selectedId === node.id;
-  const hasChildren = node.children.length > 0;
+  const visibleChildren = node.enabled ? node.children : [];
+  const hasChildren = visibleChildren.length > 0;
   const collapsed = collapsedPaths.has(node.normalized_path);
   const Icon = selected || (hasChildren && !collapsed) ? FolderOpen : Folder;
 
@@ -824,7 +882,7 @@ function DirectoryRuleTreeItem({
         </div>
       </div>
       {!collapsed &&
-        node.children.map((child) => (
+        visibleChildren.map((child) => (
           <DirectoryRuleTreeItem
             key={child.id}
             node={child}
@@ -1065,6 +1123,12 @@ function directoryRuleLabel(node: DirectoryRuleTreeNode) {
 
 function directoryHasPrefix(path: string, prefix: string) {
   return path === prefix || path.startsWith(`${prefix}/`);
+}
+
+function directoryRuleIsDescendant(rule: DirectoryRule, parent: DirectoryRule) {
+  const path = normalizeDirectoryPath(rule.normalized_path || rule.path);
+  const parentPath = normalizeDirectoryPath(parent.normalized_path || parent.path);
+  return path.length > parentPath.length && directoryHasPrefix(path, parentPath);
 }
 
 function Switch({

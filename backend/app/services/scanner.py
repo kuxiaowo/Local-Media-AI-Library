@@ -10,6 +10,7 @@ from app.core.path_utils import normalize_path, parent_dir, path_has_prefix
 from app.models.db_models import DirectoryRule, MediaFile
 from app.services.job_service import create_job
 from app.services.media_detector import detect_media_type, image_support_status
+from app.services.media_visibility import is_rule_effectively_enabled
 
 
 def scan_directory(
@@ -26,6 +27,11 @@ def scan_directory(
     if not root.exists() or not root.is_dir():
         raise FileNotFoundError(f"Directory does not exist: {rule.path}")
 
+    all_rules = list(db.scalars(select(DirectoryRule)).all())
+    if not is_rule_effectively_enabled(rule, all_rules):
+        return 0
+    excluded_paths = _disabled_descendant_paths(rule, all_rules)
+
     scan_started_at = datetime.now(timezone.utc)
     iterator = root.rglob("*") if rule.recursive else root.glob("*")
     discovered = 0
@@ -39,6 +45,8 @@ def scan_directory(
             continue
 
         normalized = normalize_path(path)
+        if _path_is_excluded(normalized, excluded_paths):
+            continue
         seen_paths.add(normalized)
         stat = path.stat()
         discovered += 1
@@ -90,9 +98,25 @@ def scan_directory(
         select(MediaFile).where(MediaFile.root_path == rule.normalized_path, MediaFile.status != "missing")
     ).all()
     for media in existing:
+        if _path_is_excluded(media.normalized_path, excluded_paths):
+            continue
         if path_has_prefix(media.normalized_path, rule.normalized_path) and media.normalized_path not in seen_paths:
             media.status = "missing"
             media.error_message = "File was not found during the latest scan"
 
     db.commit()
     return discovered
+
+
+def _disabled_descendant_paths(rule: DirectoryRule, rules: list[DirectoryRule]) -> list[str]:
+    return [
+        normalize_path(item.normalized_path)
+        for item in rules
+        if not item.enabled
+        and len(item.normalized_path) > len(rule.normalized_path)
+        and path_has_prefix(item.normalized_path, rule.normalized_path)
+    ]
+
+
+def _path_is_excluded(path: str, excluded_paths: list[str]) -> bool:
+    return any(path_has_prefix(path, excluded_path) for excluded_path in excluded_paths)

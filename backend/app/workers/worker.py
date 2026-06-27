@@ -16,6 +16,7 @@ from app.models.db_models import DirectoryRule, EmbeddingProfile, Job, MediaEmbe
 from app.services.ai_analyzer import analyze_image, analyze_video, regenerate_video_final_summary
 from app.services.embedding_service import generate_embedding
 from app.services.job_service import mark_completed, mark_failed, mark_running
+from app.services.media_visibility import is_media_visible, is_rule_effectively_enabled
 from app.services.metadata_extractor import extract_image_metadata, extract_video_metadata
 from app.services.ollama_client import OllamaClient
 from app.services.rule_resolver import resolve_rule, rule_config_hash
@@ -210,6 +211,8 @@ class WorkerManager:
             rule = db.get(DirectoryRule, job.target_id)
             if rule is None:
                 raise RuntimeError("Directory rule does not exist")
+            if not is_rule_effectively_enabled(rule, list(db.scalars(select(DirectoryRule)).all())):
+                return
             payload = job.payload or {}
             mode = payload.get("mode", "incremental")
             run_ai = payload.get("run_ai", True) is not False
@@ -226,13 +229,12 @@ class WorkerManager:
             )
             if media is None:
                 raise RuntimeError("Media file does not exist")
-            rules = db.scalars(select(DirectoryRule).where(DirectoryRule.enabled)).all()
+            if not is_media_visible(db, media):
+                return
+            rules = db.scalars(select(DirectoryRule)).all()
             rule = resolve_rule(media.path, list(rules))
             if rule is None:
-                media.status = "failed"
-                media.error_message = "No enabled directory rule matched this media file"
-                db.commit()
-                raise RuntimeError(media.error_message)
+                return
             media.folder_rule_id = rule.id
             media.resolved_config_hash = rule_config_hash(rule)
             if media.media_type == "video":
@@ -256,6 +258,8 @@ class WorkerManager:
             )
             if media is None:
                 raise RuntimeError("Media file does not exist")
+            if not is_media_visible(db, media):
+                return
             if job.job_type == "analyze_video":
                 payload = job.payload or {}
                 asyncio.run(
@@ -304,6 +308,8 @@ class WorkerManager:
             )
             if media is None:
                 raise RuntimeError("Media file does not exist")
+            if not is_media_visible(db, media):
+                return
             asyncio.run(generate_embedding(db, media, OllamaClient()))
             return
 
@@ -311,6 +317,8 @@ class WorkerManager:
             media = db.get(MediaFile, job.target_id)
             if media is None:
                 raise RuntimeError("Media file does not exist")
+            if not is_media_visible(db, media):
+                return
             media.status = "needs_reanalysis"
             db.commit()
             from app.services.job_service import create_job

@@ -29,17 +29,15 @@ class RuleLike(Protocol):
 
 
 def resolve_rule(file_path: str, rules: list[RuleLike]) -> RuleLike | None:
-    candidates = []
     normalized = normalize_path(file_path)
+    matching_rules: list[tuple[RuleLike, str]] = []
     for rule in rules:
-        if not rule.enabled:
-            continue
-        rule_path = getattr(rule, "normalized_path", None) or normalize_path(rule.path)
+        rule_path = normalize_path(getattr(rule, "normalized_path", None) or rule.path)
         if path_has_prefix(normalized, rule_path):
-            candidates.append(rule)
-    if not candidates:
+            matching_rules.append((rule, rule_path))
+    if not matching_rules or any(not rule.enabled for rule, _rule_path in matching_rules):
         return None
-    return max(candidates, key=lambda rule: len(getattr(rule, "normalized_path", None) or rule.path))
+    return max(matching_rules, key=lambda item: len(item[1]))[0]
 
 
 def rule_config_hash(rule: RuleLike) -> str:

@@ -23,7 +23,7 @@ from app.models.schemas import (
     MediaListResponse,
 )
 from app.services.job_service import create_job
-from app.services.media_visibility import is_media_visible, visible_media_filter
+from app.services.media_visibility import effective_enabled_rules, is_media_visible, visible_media_filter
 
 router = APIRouter(prefix="/media", tags=["media"])
 
@@ -65,12 +65,13 @@ def list_media_directories(db: Session = Depends(get_db)) -> list[MediaDirectory
     directories: dict[str, MediaDirectoryRead] = {}
 
     visibility_filter = visible_media_filter(db)
+    enabled_rules = effective_enabled_rules(list(db.scalars(select(DirectoryRule)).all()))
 
-    for rule in db.scalars(select(DirectoryRule).where(DirectoryRule.enabled)).all():
-        directories[rule.normalized_path] = MediaDirectoryRead(
+    for rule in enabled_rules:
+        _upsert_directory(
+            directories,
             path=rule.normalized_path,
             display_path=rule.path,
-            name=_directory_name(rule.path),
             direct_media_count=0,
         )
 
@@ -83,16 +84,24 @@ def list_media_directories(db: Session = Depends(get_db)) -> list[MediaDirectory
         if not parent_dir:
             continue
         display_path = _display_parent_path(sample_path, parent_dir)
-        existing = directories.get(parent_dir)
-        if existing is None:
-            directories[parent_dir] = MediaDirectoryRead(
-                path=parent_dir,
-                display_path=display_path,
-                name=_directory_name(display_path),
-                direct_media_count=int(media_count),
+        root = _longest_matching_rule(parent_dir, enabled_rules)
+        _upsert_directory(
+            directories,
+            path=parent_dir,
+            display_path=display_path,
+            direct_media_count=int(media_count),
+        )
+        for ancestor_path, ancestor_display_path in _directory_ancestors(
+            parent_dir,
+            display_path,
+            stop_path=root.normalized_path if root else None,
+        ):
+            _upsert_directory(
+                directories,
+                path=ancestor_path,
+                display_path=ancestor_display_path,
+                direct_media_count=0,
             )
-        else:
-            existing.direct_media_count = int(media_count)
 
     return sorted(directories.values(), key=lambda item: item.path)
 
@@ -254,6 +263,59 @@ def _display_parent_path(sample_path: str | None, fallback: str) -> str:
     if "/" not in normalized:
         return fallback
     return normalized.rsplit("/", 1)[0]
+
+
+def _upsert_directory(
+    directories: dict[str, MediaDirectoryRead],
+    *,
+    path: str,
+    display_path: str,
+    direct_media_count: int,
+) -> None:
+    normalized_path = normalize_path(path)
+    existing = directories.get(normalized_path)
+    if existing is None:
+        directories[normalized_path] = MediaDirectoryRead(
+            path=normalized_path,
+            display_path=display_path.replace("\\", "/").rstrip("/") or display_path,
+            name=_directory_name(display_path),
+            direct_media_count=direct_media_count,
+        )
+        return
+    existing.direct_media_count += direct_media_count
+
+
+def _longest_matching_rule(parent_dir: str, rules: list[DirectoryRule]) -> DirectoryRule | None:
+    normalized = normalize_path(parent_dir)
+    matches = [rule for rule in rules if normalized == rule.normalized_path or normalized.startswith(f"{rule.normalized_path}/")]
+    if not matches:
+        return None
+    return max(matches, key=lambda rule: len(rule.normalized_path))
+
+
+def _directory_ancestors(
+    path: str,
+    display_path: str,
+    *,
+    stop_path: str | None,
+) -> list[tuple[str, str]]:
+    ancestors: list[tuple[str, str]] = []
+    current_path = normalize_path(path)
+    current_display_path = display_path.replace("\\", "/").rstrip("/")
+    normalized_stop_path = normalize_path(stop_path) if stop_path else None
+
+    while "/" in current_path:
+        if normalized_stop_path and current_path == normalized_stop_path:
+            break
+        parent_path = current_path.rsplit("/", 1)[0]
+        parent_display_path = current_display_path.rsplit("/", 1)[0] if "/" in current_display_path else parent_path
+        if not parent_path or parent_path == current_path:
+            break
+        ancestors.append((parent_path, parent_display_path))
+        current_path = parent_path
+        current_display_path = parent_display_path
+
+    return ancestors
 
 
 def _directory_name(path: str) -> str:

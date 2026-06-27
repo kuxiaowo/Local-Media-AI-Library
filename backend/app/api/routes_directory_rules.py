@@ -28,6 +28,11 @@ def create_rule(payload: DirectoryRuleCreate, db: Session = Depends(get_db)) -> 
     normalized = normalize_path(data["path"])
     if db.scalar(select(DirectoryRule).where(DirectoryRule.normalized_path == normalized)):
         raise HTTPException(status_code=409, detail="Directory rule already exists")
+    if data.get("enabled", True) and _has_disabled_ancestor_path(
+        normalized,
+        list(db.scalars(select(DirectoryRule)).all()),
+    ):
+        data["enabled"] = False
     rule = DirectoryRule(**data, normalized_path=normalized)
     db.add(rule)
     db.commit()
@@ -51,6 +56,11 @@ def update_rule(
         data["normalized_path"] = normalize_path(data["path"])
     for key, value in data.items():
         setattr(rule, key, value)
+    all_rules = list(db.scalars(select(DirectoryRule)).all())
+    if rule.enabled and _has_disabled_ancestor_path(rule.normalized_path, all_rules, exclude_id=rule.id):
+        rule.enabled = False
+    if not rule.enabled:
+        _disable_descendant_rules(rule, all_rules)
     after_hash = rule_config_hash(rule)
     if before_hash != after_hash:
         affected = db.scalars(
@@ -94,3 +104,29 @@ def _display_path(path: str) -> str:
     if text.startswith("//"):
         return "//" + text[2:].rstrip("/")
     return text.rstrip("/") or text
+
+
+def _disable_descendant_rules(rule: DirectoryRule, rules: list[DirectoryRule]) -> None:
+    for candidate in rules:
+        if candidate.id == rule.id:
+            continue
+        if _is_descendant_path(candidate.normalized_path, rule.normalized_path):
+            candidate.enabled = False
+
+
+def _has_disabled_ancestor_path(
+    normalized_path: str,
+    rules: list[DirectoryRule],
+    *,
+    exclude_id: uuid.UUID | None = None,
+) -> bool:
+    return any(
+        not rule.enabled
+        and rule.id != exclude_id
+        and _is_descendant_path(normalized_path, rule.normalized_path)
+        for rule in rules
+    )
+
+
+def _is_descendant_path(path: str, ancestor_path: str) -> bool:
+    return len(path) > len(ancestor_path) and path_has_prefix(path, ancestor_path)

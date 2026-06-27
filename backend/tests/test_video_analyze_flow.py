@@ -176,7 +176,7 @@ def test_analyze_video_uses_recursive_summary_for_segments(monkeypatch, tmp_path
     assert "暂无历史信息" in fake_ollama.vision_prompts[0]
     assert "media-only-context" in fake_ollama.vision_prompts[0]
     assert "directory-only-rule" in fake_ollama.vision_prompts[0]
-    assert "directory-only-context" not in fake_ollama.vision_prompts[0]
+    assert "directory-only-context\nmedia-only-context" in fake_ollama.vision_prompts[0]
     assert '"source_filename":"video.mp4"' in fake_ollama.vision_prompts[0]
     assert str(tmp_path) not in fake_ollama.vision_prompts[0]
     assert "global after segment 1" in fake_ollama.vision_prompts[1]
@@ -190,7 +190,7 @@ def test_analyze_video_uses_recursive_summary_for_segments(monkeypatch, tmp_path
     assert "segment 2 summary" in fake_ollama.summary_prompt
     assert "media-only-context" in fake_ollama.summary_prompt
     assert "directory-only-rule" in fake_ollama.summary_prompt
-    assert "directory-only-context" not in fake_ollama.summary_prompt
+    assert "directory-only-context\nmedia-only-context" in fake_ollama.summary_prompt
     assert '"source_filename":"video.mp4"' in fake_ollama.summary_prompt
     assert str(tmp_path) not in fake_ollama.summary_prompt
     assert "global after segment 3" in fake_ollama.summary_prompt

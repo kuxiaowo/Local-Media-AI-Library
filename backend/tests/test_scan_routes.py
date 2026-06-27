@@ -412,3 +412,65 @@ def test_generate_ai_records_queues_metadata_done_and_reanalysis_media() -> None
         video_media.id: "analyze_video",
     }
     assert video_media.error_message is None
+
+
+def test_generate_ai_records_skips_disabled_descendant_rule_media() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
+    Base.metadata.create_all(engine)
+    SessionLocal = sessionmaker(bind=engine, future=True, expire_on_commit=False)
+
+    with SessionLocal() as db:
+        parent_rule = DirectoryRule(
+            path="F:/Photos",
+            normalized_path="f:/photos",
+            recursive=True,
+            vision_model="vision-model",
+            summary_model="summary-model",
+            video_frame_strategy="hybrid",
+            frame_interval_seconds=5,
+            max_frames_per_video=12,
+            video_frame_max_width=1280,
+            video_batch_size=6,
+            video_batch_overlap=1,
+            analysis_detail="normal",
+            enabled=True,
+        )
+        disabled_child_rule = DirectoryRule(
+            path="F:/Photos/Private",
+            normalized_path="f:/photos/private",
+            recursive=True,
+            vision_model="vision-model",
+            summary_model="summary-model",
+            video_frame_strategy="hybrid",
+            frame_interval_seconds=5,
+            max_frames_per_video=12,
+            video_frame_max_width=1280,
+            video_batch_size=6,
+            video_batch_overlap=1,
+            analysis_detail="normal",
+            enabled=False,
+        )
+        visible_media = MediaFile(
+            path="F:/Photos/visible.jpg",
+            normalized_path="f:/photos/visible.jpg",
+            root_path="f:/photos",
+            parent_dir="f:/photos",
+            media_type="image",
+            status="metadata_done",
+            folder_rule=parent_rule,
+        )
+        hidden_media = MediaFile(
+            path="F:/Photos/Private/hidden.jpg",
+            normalized_path="f:/photos/private/hidden.jpg",
+            root_path="f:/photos",
+            parent_dir="f:/photos/private",
+            media_type="image",
+            status="metadata_done",
+            folder_rule=parent_rule,
+        )
+        db.add_all([parent_rule, disabled_child_rule, visible_media, hidden_media])
+        db.commit()
+
+        jobs = generate_ai_records(GenerateAiRecordsRequest(directory_rule_id=parent_rule.id), db=db)
+
+    assert {job.target_id for job in jobs} == {visible_media.id}

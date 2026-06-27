@@ -6,7 +6,8 @@ from collections.abc import Callable
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from app.models.db_models import MediaAiSummary, MediaFile, VideoFrameSummary, VideoSegmentSummary
+from app.core.path_utils import path_has_prefix
+from app.models.db_models import DirectoryRule, MediaAiSummary, MediaFile, VideoFrameSummary, VideoSegmentSummary
 from app.prompts.image_analysis import IMAGE_ANALYSIS_SCHEMA
 from app.prompts.video_analysis import (
     VIDEO_FINAL_SUMMARY_SCHEMA,
@@ -17,6 +18,7 @@ from app.prompts.video_analysis import (
     build_video_segment_user_prompt,
 )
 from app.services.ollama_client import OllamaClient
+from app.services.media_visibility import effective_enabled_rules
 from app.services.prompt_settings import (
     get_default_video_final_summary_prompt,
     get_default_video_final_summary_system_prompt,
@@ -37,7 +39,7 @@ async def analyze_image(db: Session, media: MediaFile, ollama: OllamaClient) -> 
         raise RuntimeError(media.error_message)
 
     rule = media.folder_rule
-    background_context = _effective_background_context(media, rule)
+    background_context = _effective_background_context(db, media)
     background_context_prompt = _effective_background_context_prompt(rule)
 
     media.status = "analyzing"
@@ -146,7 +148,7 @@ async def analyze_video(
     default_video_segment_system_prompt = get_default_video_segment_system_prompt()
     default_video_final_summary_prompt = get_default_video_final_summary_prompt()
     default_video_final_summary_system_prompt = get_default_video_final_summary_system_prompt()
-    background_context = _effective_background_context(media, rule)
+    background_context = _effective_background_context(db, media)
     background_context_prompt = _effective_background_context_prompt(rule)
 
     previous_global_summary = (
@@ -359,7 +361,7 @@ async def _finalize_video_summary(
     default_video_final_summary_prompt: str,
 ) -> MediaAiSummary:
     segment_payloads = _segment_payloads(saved_segments)
-    background_context = _effective_background_context(media, rule)
+    background_context = _effective_background_context(db, media)
     background_context_prompt = _effective_background_context_prompt(rule)
     raw = await ollama.generate_text_json(
         model=rule.summary_model,
@@ -709,8 +711,26 @@ def _confidence_label(value: float | None) -> str:
     return "low"
 
 
-def _effective_background_context(media: MediaFile, rule: object) -> str | None:
-    return _clean_text(getattr(media, "background_context", None)) or getattr(rule, "background_context", None)
+def _effective_background_context(db: Session, media: MediaFile) -> str | None:
+    parts: list[str] = []
+    rules = sorted(
+        (
+            rule
+            for rule in effective_enabled_rules(list(db.scalars(select(DirectoryRule)).all()))
+            if path_has_prefix(media.normalized_path, rule.normalized_path)
+        ),
+        key=lambda rule: len(rule.normalized_path),
+    )
+    for rule in rules:
+        text = _clean_text(rule.background_context)
+        if text:
+            parts.append(text)
+
+    media_background = _clean_text(getattr(media, "background_context", None))
+    if media_background:
+        parts.append(media_background)
+
+    return "\n".join(parts) or None
 
 
 def _effective_background_context_prompt(rule: object) -> str | None:

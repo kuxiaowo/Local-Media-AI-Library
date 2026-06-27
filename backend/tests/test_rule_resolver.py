@@ -32,6 +32,24 @@ def test_resolve_rule_uses_longest_prefix() -> None:
     assert resolved is school
 
 
+def test_resolve_rule_treats_disabled_child_as_exclusion() -> None:
+    root = Rule(path="D:/Photos", normalized_path="d:/photos")
+    disabled_child = Rule(path="D:/Photos/Private", normalized_path="d:/photos/private", enabled=False)
+
+    resolved = resolve_rule("D:/Photos/Private/a.jpg", [root, disabled_child])
+
+    assert resolved is None
+
+
+def test_resolve_rule_disabled_parent_blocks_enabled_descendant() -> None:
+    disabled_root = Rule(path="D:/Photos", normalized_path="d:/photos", enabled=False)
+    child = Rule(path="D:/Photos/Public", normalized_path="d:/photos/public", enabled=True)
+
+    resolved = resolve_rule("D:/Photos/Public/a.jpg", [disabled_root, child])
+
+    assert resolved is None
+
+
 def test_rule_hash_changes_when_model_changes() -> None:
     before = Rule(path="D:/Photos", normalized_path="d:/photos")
     after = Rule(path="D:/Photos", normalized_path="d:/photos", vision_model="vision-b")

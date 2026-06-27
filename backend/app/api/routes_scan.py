@@ -15,7 +15,7 @@ from app.models.schemas import (
     ScanStatusResponse,
 )
 from app.services.job_service import create_job, scan_status
-from app.services.media_visibility import visible_media_filter
+from app.services.media_visibility import effective_enabled_rules, is_rule_effectively_enabled, visible_media_filter
 
 router = APIRouter(prefix="/scan", tags=["scan"])
 
@@ -76,6 +76,7 @@ def generate_ai_records(payload: GenerateAiRecordsRequest, db: Session = Depends
             select(MediaFile)
             .where(
                 MediaFile.status.in_(("metadata_done", "needs_reanalysis")),
+                visible_media_filter(db),
                 or_(*path_filters),
             )
             .order_by(MediaFile.created_at.asc())
@@ -227,8 +228,10 @@ def _rules_for_request(
         rule = db.get(DirectoryRule, directory_rule_id)
         if rule is None:
             raise HTTPException(status_code=404, detail="Directory rule not found")
+        if not is_rule_effectively_enabled(rule, list(db.scalars(select(DirectoryRule)).all())):
+            raise HTTPException(status_code=400, detail=empty_detail)
         return [rule]
-    rules = list(db.scalars(select(DirectoryRule).where(DirectoryRule.enabled)).all())
+    rules = effective_enabled_rules(list(db.scalars(select(DirectoryRule)).all()))
     if not rules:
         raise HTTPException(status_code=400, detail=empty_detail)
     return rules
