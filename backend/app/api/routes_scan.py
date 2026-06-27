@@ -1,12 +1,19 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models.db_models import DirectoryRule, Job, MediaFile
-from app.models.schemas import JobRead, MediaQueueItem, MediaQueueResponse, ScanStartRequest, ScanStatusResponse
+from app.models.schemas import (
+    GenerateAiRecordsRequest,
+    JobRead,
+    MediaQueueItem,
+    MediaQueueResponse,
+    ScanStartRequest,
+    ScanStatusResponse,
+)
 from app.services.job_service import create_job, scan_status
 from app.services.media_visibility import visible_media_filter
 
@@ -21,30 +28,76 @@ MEDIA_JOB_TYPES = {
     "reanalyze_video_summary",
 }
 ACTIVE_JOB_STATUSES = {"queued", "running", "failed"}
+ACTIVE_ANALYSIS_JOB_STATUSES = {"queued", "running"}
 ANALYSIS_JOB_TYPES = MEDIA_JOB_TYPES - {"generate_embedding"}
 
 
 @router.post("/start", response_model=list[JobRead])
 def start_scan(payload: ScanStartRequest, db: Session = Depends(get_db)):
-    if payload.directory_rule_id:
-        rule = db.get(DirectoryRule, payload.directory_rule_id)
-        if rule is None:
-            raise HTTPException(status_code=404, detail="Directory rule not found")
-        rules = [rule]
-    else:
-        rules = list(db.scalars(select(DirectoryRule).where(DirectoryRule.enabled)).all())
-    if not rules:
-        raise HTTPException(status_code=400, detail="No enabled directory rules to scan")
+    rules = _rules_for_request(
+        db,
+        payload.directory_rule_id,
+        empty_detail="No enabled directory rules to scan",
+    )
     return [
         create_job(
             db,
             job_type="scan_directory",
             target_id=rule.id,
             target_path=rule.path,
-            payload={"mode": payload.mode},
+            payload={"mode": payload.mode, "run_ai": payload.run_ai},
         )
         for rule in rules
     ]
+
+
+@router.post("/generate-ai-records", response_model=list[JobRead])
+def generate_ai_records(payload: GenerateAiRecordsRequest, db: Session = Depends(get_db)) -> list[Job]:
+    rules = _rules_for_request(
+        db,
+        payload.directory_rule_id,
+        empty_detail="No enabled directory rules to generate AI records",
+    )
+    path_filters = [_media_under_rule_filter(rule.normalized_path) for rule in rules]
+    if not path_filters:
+        return []
+
+    active_analysis_media_ids = set(
+        db.scalars(
+            select(Job.target_id).where(
+                Job.job_type.in_(list(ANALYSIS_JOB_TYPES)),
+                Job.status.in_(list(ACTIVE_ANALYSIS_JOB_STATUSES)),
+                Job.target_id.is_not(None),
+            )
+        ).all()
+    )
+    candidates = list(
+        db.scalars(
+            select(MediaFile)
+            .where(
+                MediaFile.status.in_(("metadata_done", "needs_reanalysis")),
+                or_(*path_filters),
+            )
+            .order_by(MediaFile.created_at.asc())
+        ).all()
+    )
+
+    jobs: list[Job] = []
+    queued_media_ids = set()
+    for media in candidates:
+        if media.id in active_analysis_media_ids or media.id in queued_media_ids:
+            continue
+        if media.media_type == "video":
+            job_type = "analyze_video"
+        elif media.media_type == "image":
+            job_type = "analyze_image"
+        else:
+            continue
+        media.error_message = None
+        db.add(media)
+        jobs.append(create_job(db, job_type=job_type, target_id=media.id, target_path=media.path))
+        queued_media_ids.add(media.id)
+    return jobs
 
 
 @router.get("/status", response_model=ScanStatusResponse)
@@ -162,3 +215,32 @@ def _current_error_message(job: Job | None, media: MediaFile) -> str | None:
     if job.status in {"queued", "running"}:
         return None
     return media.error_message
+
+
+def _rules_for_request(
+    db: Session,
+    directory_rule_id: object | None,
+    *,
+    empty_detail: str,
+) -> list[DirectoryRule]:
+    if directory_rule_id:
+        rule = db.get(DirectoryRule, directory_rule_id)
+        if rule is None:
+            raise HTTPException(status_code=404, detail="Directory rule not found")
+        return [rule]
+    rules = list(db.scalars(select(DirectoryRule).where(DirectoryRule.enabled)).all())
+    if not rules:
+        raise HTTPException(status_code=400, detail=empty_detail)
+    return rules
+
+
+def _media_under_rule_filter(normalized_path: str):
+    normalized = normalized_path.rstrip("/")
+    return or_(
+        MediaFile.normalized_path == normalized,
+        MediaFile.normalized_path.like(f"{_escape_like(normalized)}/%", escape="\\"),
+    )
+
+
+def _escape_like(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")

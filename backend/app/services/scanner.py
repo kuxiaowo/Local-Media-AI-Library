@@ -17,6 +17,7 @@ def scan_directory(
     rule: DirectoryRule,
     job_id: object | None = None,
     mode: str = "incremental",
+    run_ai: bool = True,
 ) -> int:
     if mode not in {"incremental", "full"}:
         raise ValueError(f"Unknown scan mode: {mode}")
@@ -77,7 +78,13 @@ def scan_directory(
             media.status = "failed"
             media.error_message = "HEIC/HEIF is recognized but not supported in the MVP"
         elif mode == "full" or created or was_missing:
-            create_job(db, job_type="extract_metadata", target_id=media.id, target_path=media.path)
+            create_job(
+                db,
+                job_type="extract_metadata",
+                target_id=media.id,
+                target_path=media.path,
+                payload={"run_ai": run_ai},
+            )
 
     existing = db.scalars(
         select(MediaFile).where(MediaFile.root_path == rule.normalized_path, MediaFile.status != "missing")

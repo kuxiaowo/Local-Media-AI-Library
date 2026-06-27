@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -22,10 +23,12 @@ def list_rules(db: Session = Depends(get_db)) -> list[DirectoryRule]:
 
 @router.post("", response_model=DirectoryRuleRead)
 def create_rule(payload: DirectoryRuleCreate, db: Session = Depends(get_db)) -> DirectoryRule:
-    normalized = normalize_path(payload.path)
+    data = payload.model_dump()
+    data["path"] = _display_path(data["path"])
+    normalized = normalize_path(data["path"])
     if db.scalar(select(DirectoryRule).where(DirectoryRule.normalized_path == normalized)):
         raise HTTPException(status_code=409, detail="Directory rule already exists")
-    rule = DirectoryRule(**payload.model_dump(), normalized_path=normalized)
+    rule = DirectoryRule(**data, normalized_path=normalized)
     db.add(rule)
     db.commit()
     db.refresh(rule)
@@ -44,6 +47,7 @@ def update_rule(
     before_hash = rule_config_hash(rule)
     data = payload.model_dump(exclude_unset=True)
     if "path" in data and data["path"]:
+        data["path"] = _display_path(data["path"])
         data["normalized_path"] = normalize_path(data["path"])
     for key, value in data.items():
         setattr(rule, key, value)
@@ -81,3 +85,12 @@ def delete_rule(rule_id: uuid.UUID, db: Session = Depends(get_db)) -> None:
             media.root_path = None
     db.delete(rule)
     db.commit()
+
+
+def _display_path(path: str) -> str:
+    text = str(path).strip().strip('"').replace("\\", "/")
+    if re.fullmatch(r"[A-Za-z]:/*", text):
+        return f"{text[0].upper()}:/"
+    if text.startswith("//"):
+        return "//" + text[2:].rstrip("/")
+    return text.rstrip("/") or text

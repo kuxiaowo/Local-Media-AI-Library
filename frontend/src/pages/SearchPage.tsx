@@ -1,7 +1,7 @@
-import { FormEvent, useState } from 'react';
-import { useMutation, useQuery } from '@tanstack/react-query';
+import { FormEvent, useEffect, useMemo, useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { Search } from 'lucide-react';
-import { Link } from 'react-router-dom';
+import { Link, useLocation, useSearchParams } from 'react-router-dom';
 import { searchMedia } from '../api/search';
 import { listMediaDirectories } from '../api/media';
 import { API_BASE } from '../api/client';
@@ -18,37 +18,88 @@ const SEARCH_MODE_COPY: Record<SearchMode, { placeholder: string; examples: stri
   },
 };
 
+const searchMediaTypeValues = new Set(['any', 'image', 'video']);
+
 export function SearchPage() {
-  const [query, setQuery] = useState('');
-  const [searchMode, setSearchMode] = useState<SearchMode>('vector');
-  const [mediaType, setMediaType] = useState('any');
-  const [directoryPath, setDirectoryPath] = useState('');
-  const [dateFrom, setDateFrom] = useState('');
-  const [dateTo, setDateTo] = useState('');
+  const location = useLocation();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const submittedSearch = useMemo(() => readSearchParams(searchParams), [searchParams]);
+  const [query, setQuery] = useState(submittedSearch.query);
+  const [searchMode, setSearchMode] = useState<SearchMode>(submittedSearch.searchMode);
+  const [mediaType, setMediaType] = useState(submittedSearch.mediaType);
+  const [directoryPath, setDirectoryPath] = useState(submittedSearch.directoryPath);
+  const [dateFrom, setDateFrom] = useState(submittedSearch.dateFrom);
+  const [dateTo, setDateTo] = useState(submittedSearch.dateTo);
   const directoriesQuery = useQuery({
     queryKey: ['media-directories'],
     queryFn: listMediaDirectories,
   });
-  const mutation = useMutation({
-    mutationFn: () =>
+  const searchResultsQuery = useQuery({
+    queryKey: ['search', submittedSearch],
+    queryFn: () =>
       searchMedia({
-        query,
-        mode: searchMode,
-        media_type: mediaType,
-        directory_path: directoryPath || null,
-        date_from: dateFrom ? `${dateFrom}T00:00:00` : null,
-        date_to: dateTo ? `${dateTo}T23:59:59` : null,
+        query: submittedSearch.query,
+        mode: submittedSearch.searchMode,
+        media_type: submittedSearch.mediaType,
+        directory_path: submittedSearch.directoryPath || null,
+        date_from: submittedSearch.dateFrom ? `${submittedSearch.dateFrom}T00:00:00` : null,
+        date_to: submittedSearch.dateTo ? `${submittedSearch.dateTo}T23:59:59` : null,
         limit: 30,
-        candidate_k: searchMode === 'ai' ? 200 : 100,
+        candidate_k: submittedSearch.searchMode === 'ai' ? 200 : 100,
       }),
+    enabled: Boolean(submittedSearch.query.trim()),
+    staleTime: 5 * 60 * 1000,
   });
   const modeCopy = SEARCH_MODE_COPY[searchMode];
+  const detailReturnState = useMemo(
+    () => ({
+      returnTo: `${location.pathname}${location.search}`,
+      returnLabel: '返回搜索',
+    }),
+    [location.pathname, location.search],
+  );
+
+  useEffect(() => {
+    setQuery(submittedSearch.query);
+    setSearchMode(submittedSearch.searchMode);
+    setMediaType(submittedSearch.mediaType);
+    setDirectoryPath(submittedSearch.directoryPath);
+    setDateFrom(submittedSearch.dateFrom);
+    setDateTo(submittedSearch.dateTo);
+  }, [
+    submittedSearch.query,
+    submittedSearch.searchMode,
+    submittedSearch.mediaType,
+    submittedSearch.directoryPath,
+    submittedSearch.dateFrom,
+    submittedSearch.dateTo,
+  ]);
 
   function submit(event: FormEvent) {
     event.preventDefault();
-    if (query.trim()) {
-      mutation.mutate();
+    const trimmedQuery = query.trim();
+    if (!trimmedQuery) {
+      return;
     }
+
+    const nextParams = new URLSearchParams();
+    nextParams.set('q', trimmedQuery);
+    if (searchMode !== 'vector') {
+      nextParams.set('mode', searchMode);
+    }
+    if (mediaType !== 'any') {
+      nextParams.set('media_type', mediaType);
+    }
+    if (directoryPath) {
+      nextParams.set('directory_path', directoryPath);
+    }
+    if (dateFrom) {
+      nextParams.set('date_from', dateFrom);
+    }
+    if (dateTo) {
+      nextParams.set('date_to', dateTo);
+    }
+    setSearchParams(nextParams);
   }
 
   return (
@@ -75,7 +126,7 @@ export function SearchPage() {
             <option value="vector">向量检索</option>
             <option value="ai">AI 检索</option>
           </select>
-          <button className="btn btn-primary lg:w-28" type="submit" disabled={mutation.isPending}>
+          <button className="btn btn-primary lg:w-28" type="submit" disabled={searchResultsQuery.isFetching}>
             <Search className="h-4 w-4" />
             搜索
           </button>
@@ -129,27 +180,28 @@ export function SearchPage() {
         </div>
       </form>
 
-      {mutation.error && (
+      {searchResultsQuery.error && (
         <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700">
-          {mutation.error.message}
+          {searchResultsQuery.error.message}
         </div>
       )}
 
-      {mutation.data?.answer && (
+      {searchResultsQuery.data?.answer && (
         <section className="panel p-4">
           <div className="mb-2 flex flex-wrap items-center gap-2 text-xs text-slate-500">
-            <span>{mutation.data.mode === 'ai' ? 'AI 检索回答' : '搜索结果'}</span>
-            {mutation.data.ai_model && <span>模型：{mutation.data.ai_model}</span>}
-            {mutation.data.scope_total !== null && <span>范围：{mutation.data.scope_total} 项</span>}
+            <span>{searchResultsQuery.data.mode === 'ai' ? 'AI 检索回答' : '搜索结果'}</span>
+            {searchResultsQuery.data.ai_model && <span>模型：{searchResultsQuery.data.ai_model}</span>}
+            {searchResultsQuery.data.scope_total !== null && <span>范围：{searchResultsQuery.data.scope_total} 项</span>}
           </div>
-          <p className="whitespace-pre-wrap text-sm leading-6 text-slate-700">{mutation.data.answer}</p>
+          <p className="whitespace-pre-wrap text-sm leading-6 text-slate-700">{searchResultsQuery.data.answer}</p>
         </section>
       )}
 
       <section className="space-y-3">
-        {(mutation.data?.results ?? []).map((item) => (
+        {(searchResultsQuery.data?.results ?? []).map((item) => (
           <Link
             to={`/media/${item.media_id}`}
+            state={detailReturnState}
             key={item.media_id}
             className="panel grid gap-3 p-3 transition hover:border-signal sm:grid-cols-[160px_1fr]"
           >
@@ -172,10 +224,36 @@ export function SearchPage() {
             </div>
           </Link>
         ))}
-        {mutation.data && mutation.data.results.length === 0 && (
+        {searchResultsQuery.data && searchResultsQuery.data.results.length === 0 && (
           <div className="panel p-6 text-center text-sm text-slate-500">没有匹配结果</div>
         )}
       </section>
     </div>
   );
+}
+
+function readSearchParams(params: URLSearchParams) {
+  const mode = params.get('mode');
+  return {
+    query: params.get('q') ?? '',
+    searchMode: mode === 'ai' ? 'ai' : ('vector' as SearchMode),
+    mediaType: readSearchMediaType(params.get('media_type')),
+    directoryPath: params.get('directory_path') ?? '',
+    dateFrom: readDateParam(params.get('date_from')),
+    dateTo: readDateParam(params.get('date_to')),
+  };
+}
+
+function readSearchMediaType(value: string | null) {
+  if (!value || !searchMediaTypeValues.has(value)) {
+    return 'any';
+  }
+  return value;
+}
+
+function readDateParam(value: string | null) {
+  if (!value || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return '';
+  }
+  return value;
 }

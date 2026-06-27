@@ -48,6 +48,7 @@ def build_image_analysis_user_prompt(
     background_context_prompt: str | None = None,
     default_analysis_prompt: str | None = None,
     default_background_context_prompt: str | None = None,
+    source_filename: str | None = None,
 ) -> str:
     base_prompt = (
         (custom_analysis_prompt or "").strip()
@@ -55,6 +56,16 @@ def build_image_analysis_user_prompt(
         or IMAGE_ANALYSIS_USER_PROMPT
     )
     sections = [base_prompt]
+    filename = (source_filename or "").strip()
+
+    if filename:
+        sections.append(
+            "\n文件名：\n"
+            f"{filename}\n"
+            "\n文件名使用规则：\n"
+            "文件名只作为辅助信息，可用于标题、关键词和搜索词；如果文件名和画面冲突，以画面内容为准。"
+        )
+
     background = (background_context or "").strip()
 
     if background:

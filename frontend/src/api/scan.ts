@@ -1,12 +1,24 @@
 import { apiRequest } from './client';
 import type { Job, MediaQueueResponse, ScanMode, ScanStatus } from '../types';
 
-export function startScan(params: { directoryRuleId?: string | null; mode?: ScanMode } = {}) {
+export function startScan(
+  params: { directoryRuleId?: string | null; mode?: ScanMode; runAi?: boolean } = {},
+) {
   return apiRequest<Job[]>('/api/scan/start', {
     method: 'POST',
     body: JSON.stringify({
       directory_rule_id: params.directoryRuleId ?? null,
       mode: params.mode ?? 'incremental',
+      run_ai: params.runAi ?? true,
+    }),
+  });
+}
+
+export function generateAiRecords(params: { directoryRuleId?: string | null } = {}) {
+  return apiRequest<Job[]>('/api/scan/generate-ai-records', {
+    method: 'POST',
+    body: JSON.stringify({
+      directory_rule_id: params.directoryRuleId ?? null,
     }),
   });
 }

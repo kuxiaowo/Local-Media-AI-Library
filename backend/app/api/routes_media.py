@@ -38,7 +38,8 @@ def list_media(
     db: Session = Depends(get_db),
 ) -> MediaListResponse:
     stmt = select(MediaFile).options(joinedload(MediaFile.ai_summary)).order_by(
-        MediaFile.captured_at.is_(None), MediaFile.captured_at.desc(), MediaFile.created_at.desc()
+        func.lower(func.coalesce(MediaFile.parent_dir, "")),
+        func.lower(MediaFile.normalized_path),
     )
     count_stmt = select(func.count(MediaFile.id))
     visibility_filter = visible_media_filter(db)

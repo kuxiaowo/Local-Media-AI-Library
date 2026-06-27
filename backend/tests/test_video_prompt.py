@@ -43,6 +43,17 @@ def test_video_segment_prompt_uses_directory_prompt_before_default() -> None:
     assert "输入 JSON" in prompt
 
 
+def test_video_segment_prompt_includes_source_filename() -> None:
+    prompt = build_video_segment_user_prompt(
+        previous_global_summary="",
+        frame_infos=[],
+        source_filename="source-video.mp4",
+    )
+
+    assert '"source_filename":"source-video.mp4"' in prompt
+    assert "文件名线索" not in prompt
+
+
 def test_default_video_segment_prompt_describes_timestamp_format() -> None:
     assert "timestamp_seconds 是视频内秒数" in VIDEO_SEGMENT_ANALYSIS_USER_PROMPT
     assert "timestamp 是同一时间的 HH:MM:SS 格式" in VIDEO_SEGMENT_ANALYSIS_USER_PROMPT
@@ -83,6 +94,18 @@ def test_video_final_summary_prompt_contains_all_segment_summaries() -> None:
     assert "updated_timeline" not in prompt
     assert "events" not in prompt
     assert "ocr_text" not in prompt
+
+
+def test_video_final_summary_prompt_includes_source_filename() -> None:
+    prompt = build_video_final_summary_user_prompt(
+        duration_seconds=12.0,
+        final_global_summary="final memory",
+        segments=[],
+        source_filename="source-video.mp4",
+    )
+
+    assert '"source_filename":"source-video.mp4"' in prompt
+    assert "文件名线索" not in prompt
 
 
 def test_default_video_final_prompt_describes_output_content() -> None:

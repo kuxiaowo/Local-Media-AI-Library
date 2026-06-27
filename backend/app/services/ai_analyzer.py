@@ -49,6 +49,7 @@ async def analyze_image(db: Session, media: MediaFile, ollama: OllamaClient) -> 
         custom_analysis_prompt=rule.custom_analysis_prompt,
         background_context=background_context,
         background_context_prompt=background_context_prompt,
+        source_filename=_source_filename(media.path),
     )
     raw = _normalize_image_analysis(raw)
     searchable_text = build_searchable_text(
@@ -172,6 +173,7 @@ async def analyze_video(
             prompt=build_video_segment_user_prompt(
                 previous_global_summary=previous_global_summary,
                 frame_infos=frame_infos,
+                source_filename=_source_filename(media.path),
                 background_context=background_context,
                 background_context_prompt=background_context_prompt,
                 custom_segment_prompt=rule.video_segment_prompt,
@@ -370,6 +372,7 @@ async def _finalize_video_summary(
             duration_seconds=media.duration_seconds,
             segments=segment_payloads,
             final_global_summary=final_global_summary,
+            source_filename=_source_filename(media.path),
             background_context=background_context,
             background_context_prompt=background_context_prompt,
             custom_final_prompt=rule.video_final_summary_prompt,
@@ -712,6 +715,13 @@ def _effective_background_context(media: MediaFile, rule: object) -> str | None:
 
 def _effective_background_context_prompt(rule: object) -> str | None:
     return getattr(rule, "background_context_prompt", None)
+
+
+def _source_filename(path: str | None) -> str:
+    if not path:
+        return ""
+    normalized = path.replace("\\", "/").rstrip("/")
+    return normalized.rsplit("/", 1)[-1]
 
 
 def _report_progress(

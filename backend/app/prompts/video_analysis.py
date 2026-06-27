@@ -132,6 +132,7 @@ def build_video_segment_user_prompt(
     *,
     previous_global_summary: str,
     frame_infos: Iterable[dict],
+    source_filename: str | None = None,
     background_context: str | None = None,
     background_context_prompt: str | None = None,
     custom_segment_prompt: str | None = None,
@@ -139,6 +140,7 @@ def build_video_segment_user_prompt(
 ) -> str:
     current_frame_info = list(frame_infos)
     payload = {
+        "source_filename": (source_filename or "").strip(),
         "previous_global_summary": previous_global_summary or "暂无历史信息",
         "current_frame_info": current_frame_info,
     }
@@ -167,12 +169,14 @@ def build_video_final_summary_user_prompt(
     duration_seconds: float | None,
     segments: Iterable[dict],
     final_global_summary: str,
+    source_filename: str | None = None,
     background_context: str | None = None,
     background_context_prompt: str | None = None,
     custom_final_prompt: str | None = None,
     default_final_prompt: str | None = None,
 ) -> str:
     payload = {
+        "source_filename": (source_filename or "").strip(),
         "duration_seconds": duration_seconds,
         "final_global_summary": final_global_summary or "",
         "segments": list(segments),

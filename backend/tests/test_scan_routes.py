@@ -3,9 +3,10 @@ from __future__ import annotations
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.api.routes_scan import get_media_queue
+from app.api.routes_scan import generate_ai_records, get_media_queue
 from app.database import Base
 from app.models.db_models import DirectoryRule, Job, MediaFile
+from app.models.schemas import GenerateAiRecordsRequest
 
 
 def test_media_queue_only_lists_active_or_failed_jobs() -> None:
@@ -312,3 +313,102 @@ def test_media_queue_hides_stale_media_error_while_job_is_running() -> None:
     assert response.total == 1
     assert response.items[0].job_status == "running"
     assert response.items[0].error_message is None
+
+
+def test_generate_ai_records_queues_metadata_done_and_reanalysis_media() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
+    Base.metadata.create_all(engine)
+    SessionLocal = sessionmaker(bind=engine, future=True, expire_on_commit=False)
+
+    with SessionLocal() as db:
+        rule = DirectoryRule(
+            path="F:/Photos",
+            normalized_path="f:/photos",
+            recursive=True,
+            vision_model="vision-model",
+            summary_model="summary-model",
+            video_frame_strategy="hybrid",
+            frame_interval_seconds=5,
+            max_frames_per_video=12,
+            video_frame_max_width=1280,
+            video_batch_size=6,
+            video_batch_overlap=1,
+            analysis_detail="normal",
+            enabled=True,
+        )
+        image_media = MediaFile(
+            path="F:/Photos/image.jpg",
+            normalized_path="f:/photos/image.jpg",
+            root_path="f:/photos",
+            parent_dir="f:/photos",
+            media_type="image",
+            status="metadata_done",
+            folder_rule=rule,
+        )
+        video_media = MediaFile(
+            path="F:/Photos/video.mp4",
+            normalized_path="f:/photos/video.mp4",
+            root_path="f:/photos",
+            parent_dir="f:/photos",
+            media_type="video",
+            status="needs_reanalysis",
+            error_message="stale analysis",
+            folder_rule=rule,
+        )
+        done_media = MediaFile(
+            path="F:/Photos/done.jpg",
+            normalized_path="f:/photos/done.jpg",
+            root_path="f:/photos",
+            parent_dir="f:/photos",
+            media_type="image",
+            status="done",
+            folder_rule=rule,
+        )
+        pending_media = MediaFile(
+            path="F:/Photos/pending.jpg",
+            normalized_path="f:/photos/pending.jpg",
+            root_path="f:/photos",
+            parent_dir="f:/photos",
+            media_type="image",
+            status="pending",
+            folder_rule=rule,
+        )
+        active_media = MediaFile(
+            path="F:/Photos/active.jpg",
+            normalized_path="f:/photos/active.jpg",
+            root_path="f:/photos",
+            parent_dir="f:/photos",
+            media_type="image",
+            status="metadata_done",
+            folder_rule=rule,
+        )
+        outside_media = MediaFile(
+            path="F:/Other/outside.jpg",
+            normalized_path="f:/other/outside.jpg",
+            root_path="f:/other",
+            parent_dir="f:/other",
+            media_type="image",
+            status="metadata_done",
+        )
+        db.add_all([rule, image_media, video_media, done_media, pending_media, active_media, outside_media])
+        db.flush()
+        db.add(
+            Job(
+                job_type="analyze_image",
+                status="queued",
+                target_id=active_media.id,
+                target_path=active_media.path,
+                payload={},
+            )
+        )
+        db.commit()
+
+        jobs = generate_ai_records(GenerateAiRecordsRequest(directory_rule_id=rule.id), db=db)
+        db.refresh(video_media)
+
+    jobs_by_target = {job.target_id: job.job_type for job in jobs}
+    assert jobs_by_target == {
+        image_media.id: "analyze_image",
+        video_media.id: "analyze_video",
+    }
+    assert video_media.error_message is None

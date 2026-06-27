@@ -210,8 +210,10 @@ class WorkerManager:
             rule = db.get(DirectoryRule, job.target_id)
             if rule is None:
                 raise RuntimeError("Directory rule does not exist")
-            mode = (job.payload or {}).get("mode", "incremental")
-            discovered = scan_directory(db, rule, job.id, mode=mode)
+            payload = job.payload or {}
+            mode = payload.get("mode", "incremental")
+            run_ai = payload.get("run_ai", True) is not False
+            discovered = scan_directory(db, rule, job.id, mode=mode, run_ai=run_ai)
             job.progress_current = discovered
             job.progress_total = discovered
             return
@@ -238,7 +240,8 @@ class WorkerManager:
             else:
                 extract_image_metadata(db, media)
             db.commit()
-            if media.status == "metadata_done" and rule.enabled and _job_row_exists(db, job.id):
+            run_ai = (job.payload or {}).get("run_ai", True) is not False
+            if media.status == "metadata_done" and rule.enabled and run_ai and _job_row_exists(db, job.id):
                 from app.services.job_service import create_job
 
                 analyze_job_type = "analyze_video" if media.media_type == "video" else "analyze_image"

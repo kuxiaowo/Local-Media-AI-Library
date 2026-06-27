@@ -1,7 +1,18 @@
 import { FormEvent, useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useSearchParams } from 'react-router-dom';
-import { FolderOpen, FolderPlus, Play, RefreshCw, Save, Trash2 } from 'lucide-react';
+import {
+  ChevronDown,
+  ChevronRight,
+  Folder,
+  FolderOpen,
+  FolderPlus,
+  Play,
+  RefreshCw,
+  Save,
+  Sparkles,
+  Trash2,
+} from 'lucide-react';
 import {
   createDirectoryRule,
   deleteDirectoryRule,
@@ -9,7 +20,7 @@ import {
   updateDirectoryRule,
 } from '../api/directoryRules';
 import { getOllamaModels } from '../api/models';
-import { startScan } from '../api/scan';
+import { generateAiRecords, startScan } from '../api/scan';
 import {
   browseDirectory,
   getDefaultAnalysisPrompt,
@@ -17,7 +28,7 @@ import {
   getDefaultVideoFinalSummaryPrompt,
   getDefaultVideoSegmentPrompt,
 } from '../api/settings';
-import type { DirectoryRule, DirectoryRulePayload, ScanMode } from '../types';
+import type { DirectoryRule, DirectoryRulePayload } from '../types';
 
 function createDefaultPayload(
   defaultAnalysisPrompt = '',
@@ -46,6 +57,12 @@ function createDefaultPayload(
     enabled: true,
   };
 }
+
+type DirectoryRuleTreeNode = DirectoryRule & {
+  children: DirectoryRuleTreeNode[];
+  parentPath: string | null;
+  parentDisplayPath: string | null;
+};
 
 export function LibrarySettingsPage() {
   const queryClient = useQueryClient();
@@ -84,12 +101,47 @@ export function LibrarySettingsPage() {
     () => rulesQuery.data?.find((rule) => rule.id === selectedId) ?? null,
     [rulesQuery.data, selectedId],
   );
+  const ruleTree = useMemo(() => buildDirectoryRuleTree(rulesQuery.data ?? []), [rulesQuery.data]);
+  const selectedRuleAncestorPaths = useMemo(
+    () => findRuleAncestorPaths(ruleTree, selected?.normalized_path ?? null) ?? [],
+    [ruleTree, selected?.normalized_path],
+  );
+  const [collapsedRulePaths, setCollapsedRulePaths] = useState<Set<string>>(() => new Set());
+
+  useEffect(() => {
+    if (selectedRuleAncestorPaths.length === 0) {
+      return;
+    }
+    setCollapsedRulePaths((current) => {
+      const next = new Set(current);
+      let changed = false;
+      for (const path of selectedRuleAncestorPaths) {
+        if (next.delete(path)) {
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+  }, [selectedRuleAncestorPaths]);
+
+  function invalidateProcessingQueries() {
+    queryClient.invalidateQueries({ queryKey: ['directory-rules'] });
+    queryClient.invalidateQueries({ queryKey: ['media-directories'] });
+    queryClient.invalidateQueries({ queryKey: ['media-queue'] });
+    queryClient.invalidateQueries({ queryKey: ['scan-status'] });
+    queryClient.invalidateQueries({ queryKey: ['jobs'] });
+    queryClient.invalidateQueries({ queryKey: ['media'] });
+  }
 
   const saveMutation = useMutation({
-    mutationFn: () => (selected ? updateDirectoryRule(selected.id, form) : createDirectoryRule(form)),
+    mutationFn: () => {
+      const payload = normalizedDirectoryRulePayload(form);
+      return selected ? updateDirectoryRule(selected.id, payload) : createDirectoryRule(payload);
+    },
     onSuccess: (rule) => {
       queryClient.invalidateQueries({ queryKey: ['directory-rules'] });
       setSelectedId(rule.id);
+      setForm((current) => ({ ...current, path: rule.path }));
     },
   });
 
@@ -110,8 +162,16 @@ export function LibrarySettingsPage() {
   });
 
   const scanMutation = useMutation({
-    mutationFn: ({ id, mode }: { id: string; mode: ScanMode }) =>
-      startScan({ directoryRuleId: id, mode }),
+    mutationFn: (id: string) => startScan({ directoryRuleId: id, mode: 'incremental', runAi: false }),
+    onSuccess: invalidateProcessingQueries,
+  });
+  const regenerateMutation = useMutation({
+    mutationFn: (id: string) => startScan({ directoryRuleId: id, mode: 'full', runAi: true }),
+    onSuccess: invalidateProcessingQueries,
+  });
+  const generateAiMutation = useMutation({
+    mutationFn: (id: string) => generateAiRecords({ directoryRuleId: id }),
+    onSuccess: invalidateProcessingQueries,
   });
   const browseMutation = useMutation({
     mutationFn: () => browseDirectory(form.path),
@@ -121,11 +181,36 @@ export function LibrarySettingsPage() {
       }
     },
   });
+  const toggleEnabledMutation = useMutation({
+    mutationFn: ({ id, enabled }: { id: string; enabled: boolean; previousEnabled: boolean }) =>
+      updateDirectoryRule(id, { enabled }),
+    onError: (_error, variables) => {
+      queryClient.setQueryData<DirectoryRule[]>(['directory-rules'], (rules) =>
+        rules?.map((rule) =>
+          rule.id === variables.id ? { ...rule, enabled: variables.previousEnabled } : rule,
+        ),
+      );
+      if (selectedId === variables.id) {
+        setForm((current) => ({ ...current, enabled: variables.previousEnabled }));
+      }
+    },
+    onSuccess: (updatedRule) => {
+      queryClient.setQueryData<DirectoryRule[]>(['directory-rules'], (rules) =>
+        rules?.map((rule) => (rule.id === updatedRule.id ? updatedRule : rule)),
+      );
+      if (selectedId === updatedRule.id) {
+        setForm((current) => ({ ...current, enabled: updatedRule.enabled }));
+      }
+    },
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ['directory-rules'] });
+    },
+  });
 
   function selectRule(rule: DirectoryRule) {
     setSelectedId(rule.id);
     setForm({
-      path: rule.path,
+      path: normalizeDisplayPath(rule.path),
       recursive: rule.recursive,
       vision_model: rule.vision_model,
       summary_model: rule.summary_model,
@@ -169,7 +254,7 @@ export function LibrarySettingsPage() {
           defaultVideoSegmentPrompt,
           defaultVideoFinalSummaryPrompt,
         ),
-        path: requestedPath,
+        path: normalizeDisplayPath(requestedPath),
       });
     }
     setAppliedSettingsTarget(settingsTargetKey);
@@ -214,6 +299,32 @@ export function LibrarySettingsPage() {
     saveMutation.mutate();
   }
 
+  function toggleRuleCollapsed(path: string) {
+    setCollapsedRulePaths((current) => {
+      const next = new Set(current);
+      if (selectedRuleAncestorPaths.includes(path)) {
+        next.delete(path);
+        return next;
+      }
+      if (next.has(path)) {
+        next.delete(path);
+      } else {
+        next.add(path);
+      }
+      return next;
+    });
+  }
+
+  function toggleRuleEnabled(rule: DirectoryRule, enabled: boolean) {
+    if (selectedId === rule.id) {
+      setForm((current) => ({ ...current, enabled }));
+    }
+    queryClient.setQueryData<DirectoryRule[]>(['directory-rules'], (rules) =>
+      rules?.map((item) => (item.id === rule.id ? { ...item, enabled } : item)),
+    );
+    toggleEnabledMutation.mutate({ id: rule.id, enabled, previousEnabled: rule.enabled });
+  }
+
   return (
     <div className="space-y-4">
       <header className="flex flex-wrap items-center justify-between gap-3">
@@ -245,24 +356,15 @@ export function LibrarySettingsPage() {
         <section className="panel overflow-hidden">
           <div className="border-b border-line px-4 py-3 text-sm font-semibold">目录</div>
           <div className="max-h-[calc(100vh-180px)] overflow-auto p-2">
-            {(rulesQuery.data ?? []).map((rule) => (
-              <button
-                key={rule.id}
-                className={`mb-2 w-full rounded-md border p-3 text-left text-sm transition ${
-                  selectedId === rule.id
-                    ? 'border-accent bg-emerald-50'
-                    : 'border-line bg-white hover:border-signal'
-                }`}
-                onClick={() => selectRule(rule)}
-              >
-                <div className="truncate font-medium">{rule.path}</div>
-                <div className="mt-1 flex items-center gap-2 text-xs text-slate-500">
-                  <span>{rule.enabled ? '已启用' : '已停用'}</span>
-                  <span>{rule.recursive ? '递归扫描' : '仅当前层'}</span>
-                </div>
-                <div className="mt-2 truncate text-xs text-slate-600">{rule.vision_model}</div>
-              </button>
-            ))}
+            <DirectoryRuleTree
+              nodes={ruleTree}
+              selectedId={selectedId}
+              collapsedPaths={collapsedRulePaths}
+              toggleDisabled={toggleEnabledMutation.isPending}
+              onSelect={selectRule}
+              onToggleCollapsed={toggleRuleCollapsed}
+              onToggleEnabled={toggleRuleEnabled}
+            />
             {rulesQuery.data?.length === 0 && (
               <div className="p-6 text-center text-sm text-slate-500">暂无目录规则</div>
             )}
@@ -452,14 +554,6 @@ export function LibrarySettingsPage() {
               />
               递归扫描
             </label>
-            <label className="flex items-center gap-2 text-sm">
-              <input
-                type="checkbox"
-                checked={form.enabled}
-                onChange={(event) => setForm({ ...form, enabled: event.target.checked })}
-              />
-              启用
-            </label>
           </div>
 
           <div className="mt-4 grid gap-4">
@@ -545,9 +639,23 @@ export function LibrarySettingsPage() {
               无法读取默认视频最终总结提示词：{defaultVideoFinalPromptQuery.error.message}
             </div>
           )}
-          {(saveMutation.error || deleteMutation.error || scanMutation.error || browseMutation.error) && (
+          {(saveMutation.error ||
+            deleteMutation.error ||
+            scanMutation.error ||
+            regenerateMutation.error ||
+            generateAiMutation.error ||
+            browseMutation.error ||
+            toggleEnabledMutation.error) && (
             <div className="mt-4 whitespace-pre-line rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700">
-              {(saveMutation.error ?? deleteMutation.error ?? scanMutation.error ?? browseMutation.error)?.message}
+              {(
+                saveMutation.error ??
+                deleteMutation.error ??
+                scanMutation.error ??
+                regenerateMutation.error ??
+                generateAiMutation.error ??
+                browseMutation.error ??
+                toggleEnabledMutation.error
+              )?.message}
             </div>
           )}
 
@@ -561,19 +669,29 @@ export function LibrarySettingsPage() {
                 <button
                   className="btn"
                   type="button"
-                  onClick={() => scanMutation.mutate({ id: selected.id, mode: 'incremental' })}
+                  onClick={() => scanMutation.mutate(selected.id)}
                   disabled={scanMutation.isPending}
-                  title="只发现并处理这个目录下的新文件"
+                  title="只扫描这个目录下的媒体并生成元数据和缩略图，不调用 AI"
                 >
                   <Play className="h-4 w-4" />
-                  检测新文件
+                  扫描照片
                 </button>
                 <button
                   className="btn"
                   type="button"
-                  onClick={() => scanMutation.mutate({ id: selected.id, mode: 'full' })}
-                  disabled={scanMutation.isPending}
-                  title="重新生成这个目录下已扫描文件的元数据、AI 总结和 embedding"
+                  onClick={() => generateAiMutation.mutate(selected.id)}
+                  disabled={generateAiMutation.isPending}
+                  title="为这个目录下已扫描但未生成 AI 记录的媒体排队"
+                >
+                  <Sparkles className="h-4 w-4" />
+                  生成AI记录
+                </button>
+                <button
+                  className="btn"
+                  type="button"
+                  onClick={() => regenerateMutation.mutate(selected.id)}
+                  disabled={regenerateMutation.isPending}
+                  title="重新扫描这个目录下已记录的媒体，并重新生成元数据、AI 记录和搜索向量"
                 >
                   <RefreshCw className="h-4 w-4" />
                   全部重新生成
@@ -592,6 +710,133 @@ export function LibrarySettingsPage() {
           </div>
         </form>
       </div>
+    </div>
+  );
+}
+
+function DirectoryRuleTree({
+  nodes,
+  selectedId,
+  collapsedPaths,
+  toggleDisabled,
+  onSelect,
+  onToggleCollapsed,
+  onToggleEnabled,
+}: {
+  nodes: DirectoryRuleTreeNode[];
+  selectedId: string | null;
+  collapsedPaths: Set<string>;
+  toggleDisabled: boolean;
+  onSelect: (rule: DirectoryRule) => void;
+  onToggleCollapsed: (path: string) => void;
+  onToggleEnabled: (rule: DirectoryRule, enabled: boolean) => void;
+}) {
+  return (
+    <div>
+      {nodes.map((node) => (
+        <DirectoryRuleTreeItem
+          key={node.id}
+          node={node}
+          level={0}
+          selectedId={selectedId}
+          collapsedPaths={collapsedPaths}
+          toggleDisabled={toggleDisabled}
+          onSelect={onSelect}
+          onToggleCollapsed={onToggleCollapsed}
+          onToggleEnabled={onToggleEnabled}
+        />
+      ))}
+    </div>
+  );
+}
+
+function DirectoryRuleTreeItem({
+  node,
+  level,
+  selectedId,
+  collapsedPaths,
+  toggleDisabled,
+  onSelect,
+  onToggleCollapsed,
+  onToggleEnabled,
+}: {
+  node: DirectoryRuleTreeNode;
+  level: number;
+  selectedId: string | null;
+  collapsedPaths: Set<string>;
+  toggleDisabled: boolean;
+  onSelect: (rule: DirectoryRule) => void;
+  onToggleCollapsed: (path: string) => void;
+  onToggleEnabled: (rule: DirectoryRule, enabled: boolean) => void;
+}) {
+  const selected = selectedId === node.id;
+  const hasChildren = node.children.length > 0;
+  const collapsed = collapsedPaths.has(node.normalized_path);
+  const Icon = selected || (hasChildren && !collapsed) ? FolderOpen : Folder;
+
+  return (
+    <div>
+      <div
+        className={`mb-2 flex w-full items-stretch overflow-hidden rounded-md border text-sm transition ${
+          selected ? 'border-accent bg-emerald-50' : 'border-line bg-white hover:border-signal'
+        }`}
+        style={{ marginLeft: `${level * 16}px` }}
+      >
+        <div className="flex shrink-0 items-center pl-2">
+          {hasChildren ? (
+            <button
+              type="button"
+              className="flex h-8 w-6 items-center justify-center rounded text-slate-500 hover:text-signal"
+              aria-label={collapsed ? '展开目录' : '折叠目录'}
+              aria-expanded={!collapsed}
+              title={collapsed ? '展开目录' : '折叠目录'}
+              onClick={() => onToggleCollapsed(node.normalized_path)}
+            >
+              {collapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+            </button>
+          ) : (
+            <span className="h-8 w-6" />
+          )}
+        </div>
+        <button
+          className="min-w-0 flex-1 p-3 pl-1 text-left"
+          type="button"
+          onClick={() => onSelect(node)}
+          title={normalizeDisplayPath(node.path)}
+        >
+          <div className="flex min-w-0 items-center gap-2">
+            <Icon className="h-4 w-4 shrink-0" />
+            <span className="truncate font-medium">{directoryRuleLabel(node)}</span>
+          </div>
+          <div className="mt-1 flex items-center gap-2 text-xs text-slate-500">
+            <span>{node.recursive ? '递归扫描' : '仅当前层'}</span>
+            <span>{node.enabled ? '已启用' : '已停用'}</span>
+          </div>
+          <div className="mt-2 truncate text-xs text-slate-600">{node.vision_model}</div>
+        </button>
+        <div className="flex shrink-0 items-center border-l border-line px-3">
+          <Switch
+            checked={node.enabled}
+            disabled={toggleDisabled}
+            label={node.enabled ? '停用目录' : '启用目录'}
+            onChange={(enabled) => onToggleEnabled(node, enabled)}
+          />
+        </div>
+      </div>
+      {!collapsed &&
+        node.children.map((child) => (
+          <DirectoryRuleTreeItem
+            key={child.id}
+            node={child}
+            level={level + 1}
+            selectedId={selectedId}
+            collapsedPaths={collapsedPaths}
+            toggleDisabled={toggleDisabled}
+            onSelect={onSelect}
+            onToggleCollapsed={onToggleCollapsed}
+            onToggleEnabled={onToggleEnabled}
+          />
+        ))}
     </div>
   );
 }
@@ -692,4 +937,164 @@ function OptionalNumberField({
 
 function normalizeDirectoryPath(path: string) {
   return path.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+}
+
+function normalizeDisplayPath(path: string) {
+  const text = path.trim().replace(/\\/g, '/');
+  if (/^[A-Za-z]:\/*$/.test(text)) {
+    return `${text[0].toUpperCase()}:/`;
+  }
+  if (text.startsWith('//')) {
+    return `//${text.slice(2).replace(/\/+$/, '')}`;
+  }
+  return text.replace(/\/+$/, '') || text;
+}
+
+function normalizedDirectoryRulePayload(payload: DirectoryRulePayload): DirectoryRulePayload {
+  return {
+    ...payload,
+    path: normalizeDisplayPath(payload.path),
+  };
+}
+
+function buildDirectoryRuleTree(rules: DirectoryRule[]): DirectoryRuleTreeNode[] {
+  const nodes = new Map<string, DirectoryRuleTreeNode>();
+  for (const rule of rules) {
+    const path = normalizeDirectoryPath(rule.normalized_path || rule.path);
+    if (!path) {
+      continue;
+    }
+    nodes.set(path, {
+      ...rule,
+      normalized_path: path,
+      children: [],
+      parentPath: null,
+      parentDisplayPath: null,
+    });
+  }
+
+  const sorted = Array.from(nodes.values()).sort(compareDirectoryRuleNodes);
+  const roots: DirectoryRuleTreeNode[] = [];
+  for (const node of sorted) {
+    const parent = findLongestRuleParent(node, sorted);
+    if (parent) {
+      node.parentPath = parent.normalized_path;
+      node.parentDisplayPath = parent.path;
+      parent.children.push(node);
+    } else {
+      roots.push(node);
+    }
+  }
+
+  for (const root of roots) {
+    sortRuleChildren(root);
+  }
+  return roots.sort(compareDirectoryRuleNodes);
+}
+
+function findLongestRuleParent(
+  node: DirectoryRuleTreeNode,
+  candidates: DirectoryRuleTreeNode[],
+): DirectoryRuleTreeNode | null {
+  let parent: DirectoryRuleTreeNode | null = null;
+  for (const candidate of candidates) {
+    if (
+      candidate.normalized_path === node.normalized_path ||
+      candidate.normalized_path.length >= node.normalized_path.length
+    ) {
+      continue;
+    }
+    if (
+      directoryHasPrefix(node.normalized_path, candidate.normalized_path) &&
+      (!parent || candidate.normalized_path.length > parent.normalized_path.length)
+    ) {
+      parent = candidate;
+    }
+  }
+  return parent;
+}
+
+function sortRuleChildren(node: DirectoryRuleTreeNode) {
+  node.children.sort(compareDirectoryRuleNodes);
+  for (const child of node.children) {
+    sortRuleChildren(child);
+  }
+}
+
+function compareDirectoryRuleNodes(left: DirectoryRuleTreeNode, right: DirectoryRuleTreeNode) {
+  return left.path.localeCompare(right.path, 'zh-Hans-CN', {
+    numeric: true,
+    sensitivity: 'base',
+  });
+}
+
+function findRuleAncestorPaths(
+  nodes: DirectoryRuleTreeNode[],
+  path: string | null,
+  ancestors: string[] = [],
+): string[] | null {
+  if (!path) {
+    return null;
+  }
+  const normalized = normalizeDirectoryPath(path);
+  for (const node of nodes) {
+    if (node.normalized_path === normalized) {
+      return ancestors;
+    }
+    const childAncestors = findRuleAncestorPaths(node.children, normalized, [...ancestors, node.normalized_path]);
+    if (childAncestors) {
+      return childAncestors;
+    }
+  }
+  return null;
+}
+
+function directoryRuleLabel(node: DirectoryRuleTreeNode) {
+  if (!node.parentPath) {
+    return normalizeDisplayPath(node.path);
+  }
+  if (node.parentDisplayPath) {
+    const displayPath = normalizeDisplayPath(node.path);
+    const parentDisplayPath = normalizeDisplayPath(node.parentDisplayPath);
+    if (normalizeDirectoryPath(displayPath).startsWith(`${normalizeDirectoryPath(parentDisplayPath)}/`)) {
+      return displayPath.slice(parentDisplayPath.length + 1) || node.path;
+    }
+  }
+  return node.normalized_path.slice((node.parentPath ?? '').length + 1) || node.path;
+}
+
+function directoryHasPrefix(path: string, prefix: string) {
+  return path === prefix || path.startsWith(`${prefix}/`);
+}
+
+function Switch({
+  checked,
+  disabled,
+  label,
+  onChange,
+}: {
+  checked: boolean;
+  disabled?: boolean;
+  label: string;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <label
+      className={`relative inline-flex h-6 w-11 shrink-0 items-center ${
+        disabled ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'
+      }`}
+      title={label}
+    >
+      <input
+        aria-label={label}
+        className="peer sr-only"
+        type="checkbox"
+        checked={checked}
+        disabled={disabled}
+        onChange={(event) => onChange(event.target.checked)}
+      />
+      <span className="absolute inset-0 rounded-full bg-slate-300 transition peer-checked:bg-accent peer-focus-visible:ring-2 peer-focus-visible:ring-signal/30" />
+      <span className="absolute left-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition peer-checked:translate-x-5" />
+    </label>
+  );
 }

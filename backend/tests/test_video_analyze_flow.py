@@ -177,6 +177,8 @@ def test_analyze_video_uses_recursive_summary_for_segments(monkeypatch, tmp_path
     assert "media-only-context" in fake_ollama.vision_prompts[0]
     assert "directory-only-rule" in fake_ollama.vision_prompts[0]
     assert "directory-only-context" not in fake_ollama.vision_prompts[0]
+    assert '"source_filename":"video.mp4"' in fake_ollama.vision_prompts[0]
+    assert str(tmp_path) not in fake_ollama.vision_prompts[0]
     assert "global after segment 1" in fake_ollama.vision_prompts[1]
     assert "segment 1 summary" not in fake_ollama.vision_prompts[1]
     assert "events" not in fake_ollama.vision_prompts[1]
@@ -189,6 +191,8 @@ def test_analyze_video_uses_recursive_summary_for_segments(monkeypatch, tmp_path
     assert "media-only-context" in fake_ollama.summary_prompt
     assert "directory-only-rule" in fake_ollama.summary_prompt
     assert "directory-only-context" not in fake_ollama.summary_prompt
+    assert '"source_filename":"video.mp4"' in fake_ollama.summary_prompt
+    assert str(tmp_path) not in fake_ollama.summary_prompt
     assert "global after segment 3" in fake_ollama.summary_prompt
     assert "rolling_global_summary" not in fake_ollama.summary_prompt
     assert "updated_timeline" not in fake_ollama.summary_prompt
@@ -291,6 +295,7 @@ def test_analyze_video_resume_starts_after_saved_segments(monkeypatch, tmp_path:
     assert fake_ollama.vision_image_paths == [[frame_paths[2], frame_paths[3]]]
     assert fake_ollama.vision_prompts
     assert "global after saved first segment" in fake_ollama.vision_prompts[0]
+    assert '"source_filename":"video.mp4"' in fake_ollama.vision_prompts[0]
     assert len(segments) == 2
     assert segments[0].current_segment_summary == "saved first segment"
     assert segments[1].segment_index == 2
@@ -298,6 +303,7 @@ def test_analyze_video_resume_starts_after_saved_segments(monkeypatch, tmp_path:
     assert fake_ollama.summary_prompt is not None
     assert "saved first segment" in fake_ollama.summary_prompt
     assert "segment 1 summary" in fake_ollama.summary_prompt
+    assert '"source_filename":"video.mp4"' in fake_ollama.summary_prompt
     assert summary.short_summary == "final video summary"
     assert media.status == "embedding_pending"
     assert ("analyze_segments", 1, 2) in progress_updates
@@ -390,6 +396,7 @@ def test_regenerate_video_final_summary_uses_saved_segments(tmp_path: Path) -> N
     assert fake_ollama.summary_prompt is not None
     assert "first saved segment" in fake_ollama.summary_prompt
     assert "second saved segment" in fake_ollama.summary_prompt
+    assert '"source_filename":"video.mp4"' in fake_ollama.summary_prompt
     assert summary.short_summary == "new final summary"
     assert summary.model_used == "summary-model"
     assert media.status == "embedding_pending"

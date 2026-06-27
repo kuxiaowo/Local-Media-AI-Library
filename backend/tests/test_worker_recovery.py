@@ -296,3 +296,62 @@ def test_worker_startup_recovers_failed_media_with_running_job(monkeypatch) -> N
     assert job is not None
     assert job.status == "failed"
     assert job.error_message == "All connection attempts failed"
+
+
+def test_extract_metadata_job_with_run_ai_false_does_not_queue_analysis(monkeypatch) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
+    Base.metadata.create_all(engine)
+    SessionLocal = sessionmaker(bind=engine, future=True, expire_on_commit=False)
+
+    def fake_extract_image_metadata(db, media):
+        media.status = "metadata_done"
+        media.error_message = None
+        db.add(media)
+        return media
+
+    monkeypatch.setattr(worker_module, "extract_image_metadata", fake_extract_image_metadata)
+
+    with SessionLocal() as db:
+        rule = DirectoryRule(
+            path="F:/Photos",
+            normalized_path="f:/photos",
+            recursive=True,
+            vision_model="vision-model",
+            summary_model="summary-model",
+            video_frame_strategy="hybrid",
+            frame_interval_seconds=5,
+            max_frames_per_video=12,
+            video_frame_max_width=1280,
+            video_batch_size=6,
+            video_batch_overlap=1,
+            analysis_detail="normal",
+            enabled=True,
+        )
+        media = MediaFile(
+            path="F:/Photos/input.jpg",
+            normalized_path="f:/photos/input.jpg",
+            root_path="f:/photos",
+            parent_dir="f:/photos",
+            media_type="image",
+            status="pending",
+            folder_rule=rule,
+        )
+        db.add_all([rule, media])
+        db.flush()
+        job = Job(
+            job_type="extract_metadata",
+            status="running",
+            target_id=media.id,
+            target_path=media.path,
+            payload={"run_ai": False},
+        )
+        db.add(job)
+        db.commit()
+        db.refresh(job)
+
+        WorkerManager(pools=[])._execute_job(db, job)
+        db.refresh(media)
+        jobs = list(db.scalars(select(Job).order_by(Job.created_at.asc())).all())
+
+    assert media.status == "metadata_done"
+    assert [job.job_type for job in jobs] == ["extract_metadata"]

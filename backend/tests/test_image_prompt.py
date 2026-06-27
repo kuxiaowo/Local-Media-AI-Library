@@ -34,6 +34,13 @@ def test_build_image_analysis_prompt_uses_editable_default_prompt() -> None:
     assert IMAGE_ANALYSIS_USER_PROMPT not in prompt
 
 
+def test_build_image_analysis_prompt_includes_source_filename() -> None:
+    prompt = build_image_analysis_user_prompt(source_filename="sample-video-01.mp4")
+    assert "文件名：" in prompt
+    assert "sample-video-01.mp4" in prompt
+    assert "文件名线索" not in prompt
+
+
 def test_build_image_analysis_prompt_uses_directory_background_prompt() -> None:
     prompt = build_image_analysis_user_prompt(
         background_context="这个目录是商品图。",

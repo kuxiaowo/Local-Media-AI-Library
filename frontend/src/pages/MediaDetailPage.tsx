@@ -1,7 +1,7 @@
 import { FormEvent, useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useParams } from 'react-router-dom';
-import { ExternalLink, FolderOpen, RotateCcw, Save } from 'lucide-react';
+import { useLocation, useNavigate, useParams } from 'react-router-dom';
+import { ArrowLeft, ExternalLink, FolderOpen, RotateCcw, Save } from 'lucide-react';
 import { API_BASE } from '../api/client';
 import {
   getMedia,
@@ -12,9 +12,19 @@ import {
 } from '../api/media';
 import { StatusBadge } from '../components/StatusBadge';
 
+type DetailReturnState = {
+  returnTo?: string;
+  returnLabel?: string;
+};
+
 export function MediaDetailPage() {
   const { id } = useParams<{ id: string }>();
+  const navigate = useNavigate();
+  const location = useLocation();
   const queryClient = useQueryClient();
+  const returnState = location.state as DetailReturnState | null;
+  const returnTo = typeof returnState?.returnTo === 'string' ? returnState.returnTo : '/media';
+  const returnLabel = typeof returnState?.returnLabel === 'string' ? returnState.returnLabel : '返回媒体库';
   const [backgroundForm, setBackgroundForm] = useState({
     background_context: '',
   });
@@ -70,6 +80,10 @@ export function MediaDetailPage() {
     saveBackgroundMutation.mutate();
   }
 
+  function returnToPreviousPage() {
+    navigate(returnTo, { replace: true });
+  }
+
   if (query.error) {
     return <div className="panel p-4 text-sm text-red-700">{query.error.message}</div>;
   }
@@ -80,11 +94,17 @@ export function MediaDetailPage() {
   return (
     <div className="space-y-4">
       <header className="flex flex-wrap items-center justify-between gap-3">
-        <div className="min-w-0">
-          <h1 className="truncate text-2xl font-semibold">
-            {media.ai_summary?.title ?? media.path.split(/[\\/]/).pop()}
-          </h1>
-          <p className="truncate text-sm text-slate-500">{media.path}</p>
+        <div className="flex min-w-0 items-start gap-3">
+          <button className="btn shrink-0" type="button" onClick={returnToPreviousPage} title={returnLabel}>
+            <ArrowLeft className="h-4 w-4" />
+            {returnLabel}
+          </button>
+          <div className="min-w-0">
+            <h1 className="truncate text-2xl font-semibold">
+              {media.ai_summary?.title ?? media.path.split(/[\\/]/).pop()}
+            </h1>
+            <p className="truncate text-sm text-slate-500">{media.path}</p>
+          </div>
         </div>
         <div className="flex gap-2">
           <button className="btn" onClick={() => openMutation.mutate()}>

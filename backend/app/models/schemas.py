@@ -178,6 +178,11 @@ class MediaDirectoryRead(BaseModel):
 class ScanStartRequest(BaseModel):
     directory_rule_id: uuid.UUID | None = None
     mode: Literal["incremental", "full"] = "incremental"
+    run_ai: bool = True
+
+
+class GenerateAiRecordsRequest(BaseModel):
+    directory_rule_id: uuid.UUID | None = None
 
 
 class JobRead(BaseModel):

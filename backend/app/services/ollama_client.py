@@ -57,6 +57,7 @@ class OllamaClient:
         custom_analysis_prompt: str | None = None,
         background_context: str | None = None,
         background_context_prompt: str | None = None,
+        source_filename: str | None = None,
     ) -> dict:
         image_b64 = _image_to_base64(image_path, self.settings.max_image_long_edge)
         payload = {
@@ -67,6 +68,7 @@ class OllamaClient:
                 custom_analysis_prompt=custom_analysis_prompt,
                 background_context=background_context,
                 background_context_prompt=background_context_prompt,
+                source_filename=source_filename,
                 default_analysis_prompt=get_default_analysis_prompt(),
                 default_background_context_prompt=get_default_background_context_prompt(),
             ),
