@@ -23,7 +23,7 @@ def main() -> int:
         print(f"当前 npm: {npm_path or 'not found'}", file=sys.stderr)
         return 1
 
-    return subprocess.call([npm, "run", "dev", "--", "--port", "5173"], cwd=frontend_dir)
+    return subprocess.call([npm, "run", "dev", "--", "--host", "0.0.0.0", "--port", "5173"], cwd=frontend_dir)
 
 
 if __name__ == "__main__":

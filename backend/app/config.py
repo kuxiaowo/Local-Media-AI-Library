@@ -10,7 +10,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    app_host: str = "127.0.0.1"
+    app_host: str = "0.0.0.0"
     app_port: int = 8000
     database_url: str = "mysql+pymysql://media_ai:media_ai@localhost:3306/media_ai?charset=utf8mb4"
 
@@ -44,9 +44,18 @@ class Settings(BaseSettings):
         default_factory=lambda: [
             "http://localhost:5173",
             "http://127.0.0.1:5173",
+            "http://0.0.0.0:5173",
             "http://localhost:4173",
             "http://127.0.0.1:4173",
+            "http://0.0.0.0:4173",
         ]
+    )
+    cors_origin_regex: str | None = (
+        r"https?://(localhost|127\.0\.0\.1|0\.0\.0\.0|"
+        r"10(?:\.\d{1,3}){3}|"
+        r"192\.168(?:\.\d{1,3}){2}|"
+        r"172\.(?:1[6-9]|2\d|3[0-1])(?:\.\d{1,3}){2})"
+        r"(?::\d+)?"
     )
 
     def ensure_dirs(self) -> None:

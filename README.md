@@ -63,7 +63,7 @@ python -m venv .venv
 python -m pip install -r requirements-dev.txt
 Copy-Item .env.example .env
 alembic upgrade head
-uvicorn app.main:app --host 127.0.0.1 --port 8000
+uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
 也可以在项目根目录直接运行调试脚本：
@@ -106,6 +106,12 @@ conda install -c conda-forge nodejs
 
 ```text
 http://127.0.0.1:5173
+```
+
+局域网设备访问时，把地址里的 `127.0.0.1` 换成运行本项目这台机器的局域网 IP，例如：
+
+```text
+http://192.168.1.10:5173
 ```
 
 ## 基本流程

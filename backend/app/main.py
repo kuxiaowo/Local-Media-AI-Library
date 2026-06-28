@@ -30,6 +30,7 @@ app = FastAPI(title="Local Media AI Library", version="0.1.0", lifespan=lifespan
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
+    allow_origin_regex=settings.cors_origin_regex,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -42,7 +43,7 @@ def root() -> dict[str, str]:
     return {
         "name": "Local Media AI Library API",
         "health": "/api/health",
-        "frontend": "http://127.0.0.1:5173",
+        "frontend": "http://0.0.0.0:5173",
     }
 
 
