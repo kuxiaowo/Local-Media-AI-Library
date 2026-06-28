@@ -280,7 +280,45 @@ export interface MediaGridAssistantBlock {
   items: SearchResultItem[];
 }
 
-export type AssistantBlock = TextAssistantBlock | MediaGridAssistantBlock;
+export interface SummaryAssistantBlock {
+  type: 'summary';
+  title?: string | null;
+  text: string;
+  representative_media_ids?: string[];
+}
+
+export interface QuestionAnswerAssistantBlock {
+  type: 'question_answer';
+  question?: string | null;
+  answer: string;
+  basis?: unknown;
+  confidence?: number | null;
+}
+
+export interface ClarificationAssistantBlock {
+  type: 'clarification';
+  question: string;
+}
+
+export interface StatsAssistantBlock {
+  type: 'stats';
+  stats: Record<string, unknown>;
+}
+
+export interface ComparisonAssistantBlock {
+  type: 'comparison';
+  title?: string | null;
+  rows: Array<Record<string, unknown>>;
+}
+
+export type AssistantBlock =
+  | TextAssistantBlock
+  | MediaGridAssistantBlock
+  | SummaryAssistantBlock
+  | QuestionAnswerAssistantBlock
+  | ClarificationAssistantBlock
+  | StatsAssistantBlock
+  | ComparisonAssistantBlock;
 
 export interface SearchMessage {
   id: string;
@@ -315,6 +353,28 @@ export interface ChatStreamPayload {
   date_to?: string | null;
   limit: number;
   candidate_k: number;
+  context?: {
+    runtime_context: {
+      now_iso: string;
+      today: string;
+      timezone: string;
+      locale: string;
+      recent_default_days: number;
+    };
+    ui_context: {
+      page?: string | null;
+      current_directory_path?: string | null;
+      selected_media_ids: string[];
+      visible_media_ids: string[];
+      active_filters: {
+        media_type?: 'image' | 'video' | 'any' | null;
+        directory_path?: string | null;
+        date_from?: string | null;
+        date_to?: string | null;
+        keyword?: string | null;
+      };
+    };
+  };
 }
 
 export interface ChatStreamEvent {

@@ -8,9 +8,13 @@ import { API_BASE } from '../api/client';
 import type {
   AssistantBlock,
   ChatStreamEvent,
+  ClarificationAssistantBlock,
   MediaGridAssistantBlock,
+  QuestionAnswerAssistantBlock,
   SearchMessage,
   SearchResultItem,
+  StatsAssistantBlock,
+  SummaryAssistantBlock,
   TextAssistantBlock,
 } from '../types';
 
@@ -69,6 +73,7 @@ export function AgentPage() {
     }),
     [location.pathname, location.search],
   );
+  const visibleMediaIds = useMemo(() => collectLatestVisibleMediaIds(messages), [messages]);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -91,6 +96,28 @@ export function AgentPage() {
           date_to: dateTo ? `${dateTo}T23:59:59` : null,
           limit: 30,
           candidate_k: 200,
+          context: {
+            runtime_context: {
+              now_iso: new Date().toISOString(),
+              today: todayIso(),
+              timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Shanghai',
+              locale: navigator.language || 'zh-CN',
+              recent_default_days: 30,
+            },
+            ui_context: {
+              page: 'agent',
+              current_directory_path: directoryPath || null,
+              selected_media_ids: [],
+              visible_media_ids: visibleMediaIds,
+              active_filters: {
+                media_type: mediaType,
+                directory_path: directoryPath || null,
+                date_from: dateFrom || null,
+                date_to: dateTo || null,
+                keyword: message,
+              },
+            },
+          },
         },
         handleStreamEvent,
       );
@@ -153,7 +180,39 @@ export function AgentPage() {
     if (event.event === 'media_block') {
       const block = mediaBlockFromEvent(event.data);
       if (block) {
-        setMessages((current) => appendMediaBlock(ensurePendingAssistant(current), block));
+        setMessages((current) => appendAssistantBlock(ensurePendingAssistant(current), block));
+      }
+      return;
+    }
+
+    if (event.event === 'summary_block') {
+      const block = summaryBlockFromEvent(event.data);
+      if (block) {
+        setMessages((current) => appendAssistantBlock(ensurePendingAssistant(current), block));
+      }
+      return;
+    }
+
+    if (event.event === 'qa_block') {
+      const block = qaBlockFromEvent(event.data);
+      if (block) {
+        setMessages((current) => appendAssistantBlock(ensurePendingAssistant(current), block));
+      }
+      return;
+    }
+
+    if (event.event === 'clarification_block') {
+      const block = clarificationBlockFromEvent(event.data);
+      if (block) {
+        setMessages((current) => appendAssistantBlock(ensurePendingAssistant(current), block));
+      }
+      return;
+    }
+
+    if (event.event === 'stats_block') {
+      const block = statsBlockFromEvent(event.data);
+      if (block) {
+        setMessages((current) => appendAssistantBlock(ensurePendingAssistant(current), block));
       }
       return;
     }
@@ -341,6 +400,18 @@ function ChatMessageView({
                   />
                 );
               }
+              if (block.type === 'summary') {
+                return <SummaryBlock block={block} key={`${message.id}-summary-${index}`} />;
+              }
+              if (block.type === 'question_answer') {
+                return <QuestionAnswerBlock block={block} key={`${message.id}-qa-${index}`} />;
+              }
+              if (block.type === 'clarification') {
+                return <ClarificationBlock block={block} key={`${message.id}-clarification-${index}`} />;
+              }
+              if (block.type === 'stats') {
+                return <StatsBlock block={block} key={`${message.id}-stats-${index}`} />;
+              }
               return (
                 <p className="whitespace-pre-wrap text-sm leading-6 text-slate-700" key={`${message.id}-text-${index}`}>
                   {(block as TextAssistantBlock).text}
@@ -368,6 +439,52 @@ function ToolEvents({ events }: { events: Array<Record<string, unknown>> }) {
           <span>
             {stringValue(event.tool) || '工具'}：{stringValue(event.reason) || stringValue(event.summary) || stringValue(event.event)}
           </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function SummaryBlock({ block }: { block: SummaryAssistantBlock }) {
+  return (
+    <section className="rounded-md border border-line bg-white p-3">
+      {block.title && <h2 className="mb-2 text-sm font-semibold text-ink">{block.title}</h2>}
+      <p className="whitespace-pre-wrap text-sm leading-6 text-slate-700">{block.text}</p>
+    </section>
+  );
+}
+
+function QuestionAnswerBlock({ block }: { block: QuestionAnswerAssistantBlock }) {
+  return (
+    <section className="rounded-md border border-line bg-white p-3">
+      {block.question && <div className="mb-2 text-xs font-medium text-slate-500">{block.question}</div>}
+      <p className="whitespace-pre-wrap text-sm leading-6 text-slate-800">{block.answer}</p>
+      {typeof block.confidence === 'number' && (
+        <div className="mt-2 text-xs text-slate-500">置信度 {block.confidence.toFixed(2)}</div>
+      )}
+    </section>
+  );
+}
+
+function ClarificationBlock({ block }: { block: ClarificationAssistantBlock }) {
+  return (
+    <section className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm leading-6 text-amber-900">
+      {block.question}
+    </section>
+  );
+}
+
+function StatsBlock({ block }: { block: StatsAssistantBlock }) {
+  const entries = Object.entries(block.stats ?? {}).filter(([, value]) => value !== null && value !== undefined && value !== '');
+  if (entries.length === 0) {
+    return null;
+  }
+  return (
+    <div className="grid gap-2 rounded-md border border-line bg-slate-50 p-3 sm:grid-cols-2 lg:grid-cols-3">
+      {entries.map(([key, value]) => (
+        <div key={key}>
+          <div className="text-xs text-slate-500">{formatStatLabel(key)}</div>
+          <div className="truncate text-sm font-medium text-ink">{formatStatValue(value)}</div>
         </div>
       ))}
     </div>
@@ -470,7 +587,7 @@ function appendTextDelta(messages: ChatMessage[], blockId: string, text: string)
   });
 }
 
-function appendMediaBlock(messages: ChatMessage[], block: MediaGridAssistantBlock & { block_id?: string }) {
+function appendAssistantBlock(messages: ChatMessage[], block: ChatBlock) {
   return messages.map((message) => {
     if (!message.pending) {
       return message;
@@ -488,6 +605,60 @@ function mediaBlockFromEvent(data: Record<string, unknown>): (MediaGridAssistant
     block_id: stringValue(data.block_id),
     title: stringValue(data.title) || null,
     items: data.items as SearchResultItem[],
+  };
+}
+
+function summaryBlockFromEvent(data: Record<string, unknown>): (SummaryAssistantBlock & { block_id?: string }) | null {
+  const text = stringValue(data.text);
+  if (!text) {
+    return null;
+  }
+  return {
+    type: 'summary',
+    block_id: stringValue(data.block_id),
+    title: stringValue(data.title) || null,
+    text,
+    representative_media_ids: Array.isArray(data.representative_media_ids)
+      ? data.representative_media_ids.map(String)
+      : [],
+  };
+}
+
+function qaBlockFromEvent(data: Record<string, unknown>): (QuestionAnswerAssistantBlock & { block_id?: string }) | null {
+  const answer = stringValue(data.answer);
+  if (!answer) {
+    return null;
+  }
+  return {
+    type: 'question_answer',
+    block_id: stringValue(data.block_id),
+    question: stringValue(data.question) || null,
+    answer,
+    basis: data.basis,
+    confidence: typeof data.confidence === 'number' ? data.confidence : null,
+  };
+}
+
+function clarificationBlockFromEvent(data: Record<string, unknown>): (ClarificationAssistantBlock & { block_id?: string }) | null {
+  const question = stringValue(data.question);
+  if (!question) {
+    return null;
+  }
+  return {
+    type: 'clarification',
+    block_id: stringValue(data.block_id),
+    question,
+  };
+}
+
+function statsBlockFromEvent(data: Record<string, unknown>): (StatsAssistantBlock & { block_id?: string }) | null {
+  if (!data.stats || typeof data.stats !== 'object' || Array.isArray(data.stats)) {
+    return null;
+  }
+  return {
+    type: 'stats',
+    block_id: stringValue(data.block_id),
+    stats: data.stats as Record<string, unknown>,
   };
 }
 
@@ -519,6 +690,57 @@ function readDateParam(value: string | null) {
     return '';
   }
   return value;
+}
+
+function collectLatestVisibleMediaIds(messages: ChatMessage[]) {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message.role !== 'assistant') {
+      continue;
+    }
+    const ids: string[] = [];
+    for (const block of message.blocks ?? []) {
+      if (block.type !== 'media_grid') {
+        continue;
+      }
+      ids.push(...block.items.map((item) => item.media_id));
+    }
+    if (ids.length > 0) {
+      return Array.from(new Set(ids));
+    }
+  }
+  return [];
+}
+
+function todayIso() {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const day = String(now.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function formatStatLabel(value: string) {
+  const labels: Record<string, string> = {
+    checked_count: '检查数量',
+    matched_count: '匹配数量',
+    image_count: '图片',
+    video_count: '视频',
+    date_min: '最早时间',
+    date_max: '最晚时间',
+    confidence: '置信度',
+  };
+  return labels[value] ?? value;
+}
+
+function formatStatValue(value: unknown) {
+  if (Array.isArray(value)) {
+    return value.join(', ');
+  }
+  if (typeof value === 'number') {
+    return Number.isInteger(value) ? String(value) : value.toFixed(3);
+  }
+  return stringValue(value);
 }
 
 function stringValue(value: unknown) {
