@@ -181,6 +181,7 @@ export interface ScanStatus {
   running: number;
   failed: number;
   completed: number;
+  paused: boolean;
   media_total: number;
   media_done: number;
   media_failed: number;
@@ -188,6 +189,7 @@ export interface ScanStatus {
 }
 
 export type ScanMode = 'incremental' | 'full';
+export type GenerateAiRecordsMode = 'missing' | 'all_known';
 
 export interface MediaQueueItem {
   media_id: string;
@@ -228,7 +230,6 @@ export interface RuntimeSettings {
   scan_worker_concurrency: number;
   metadata_worker_concurrency: number;
   vision_worker_concurrency: number;
-  embedding_worker_concurrency: number;
 }
 
 export interface AnalysisPromptSettings {
@@ -266,4 +267,57 @@ export interface SearchResponse {
   answer: string | null;
   ai_model: string | null;
   scope_total: number | null;
+}
+
+export interface TextAssistantBlock {
+  type: 'text';
+  text: string;
+}
+
+export interface MediaGridAssistantBlock {
+  type: 'media_grid';
+  title?: string | null;
+  items: SearchResultItem[];
+}
+
+export type AssistantBlock = TextAssistantBlock | MediaGridAssistantBlock;
+
+export interface SearchMessage {
+  id: string;
+  conversation_id: string;
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+  blocks: AssistantBlock[] | null;
+  tool_events: Array<Record<string, unknown>> | null;
+  error_message: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SearchConversationSummary {
+  id: string;
+  title: string | null;
+  last_message_at: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SearchConversation extends SearchConversationSummary {
+  messages: SearchMessage[];
+}
+
+export interface ChatStreamPayload {
+  conversation_id?: string | null;
+  message: string;
+  media_type: 'image' | 'video' | 'any';
+  directory_path?: string | null;
+  date_from?: string | null;
+  date_to?: string | null;
+  limit: number;
+  candidate_k: number;
+}
+
+export interface ChatStreamEvent {
+  event: string;
+  data: Record<string, unknown>;
 }

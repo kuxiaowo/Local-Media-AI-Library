@@ -31,7 +31,6 @@ const emptyRuntimeSettings: RuntimeSettings = {
   scan_worker_concurrency: 1,
   metadata_worker_concurrency: 6,
   vision_worker_concurrency: 1,
-  embedding_worker_concurrency: 2,
 };
 
 const emptyDirectoryRuleDefaults: DirectoryRuleDefaults = {
@@ -742,34 +741,24 @@ export function SettingsPage() {
             </p>
           </div>
         </div>
-        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
           <NumberField
             label="扫描目录"
             min={1}
-            max={8}
             value={runtimeForm.scan_worker_concurrency}
             onChange={(value) => setRuntimeForm({ ...runtimeForm, scan_worker_concurrency: value })}
           />
           <NumberField
             label="提取元数据"
             min={1}
-            max={32}
             value={runtimeForm.metadata_worker_concurrency}
             onChange={(value) => setRuntimeForm({ ...runtimeForm, metadata_worker_concurrency: value })}
           />
           <NumberField
             label="图片分析"
             min={1}
-            max={4}
             value={runtimeForm.vision_worker_concurrency}
             onChange={(value) => setRuntimeForm({ ...runtimeForm, vision_worker_concurrency: value })}
-          />
-          <NumberField
-            label="生成 Embedding"
-            min={1}
-            max={16}
-            value={runtimeForm.embedding_worker_concurrency}
-            onChange={(value) => setRuntimeForm({ ...runtimeForm, embedding_worker_concurrency: value })}
           />
         </div>
 
@@ -1082,7 +1071,7 @@ function NumberField({
 }: {
   label: string;
   min: number;
-  max: number;
+  max?: number;
   value: number;
   onChange: (value: number) => void;
 }) {

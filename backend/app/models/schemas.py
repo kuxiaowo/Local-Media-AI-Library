@@ -198,6 +198,7 @@ class ScanStartRequest(BaseModel):
 
 class GenerateAiRecordsRequest(BaseModel):
     directory_rule_id: uuid.UUID | None = None
+    mode: Literal["missing", "all_known"] = "missing"
 
 
 class JobRead(BaseModel):
@@ -226,10 +227,15 @@ class ScanStatusResponse(BaseModel):
     running: int
     failed: int
     completed: int
+    paused: bool = False
     media_total: int
     media_done: int
     media_failed: int
     media_missing: int
+
+
+class ScanPauseResponse(BaseModel):
+    paused: bool
 
 
 class MediaQueueItem(BaseModel):
@@ -294,6 +300,45 @@ class SearchResponse(BaseModel):
     answer: str | None = None
     ai_model: str | None = None
     scope_total: int | None = None
+
+
+class ChatStreamRequest(BaseModel):
+    conversation_id: uuid.UUID | None = None
+    message: str = Field(min_length=1)
+    media_type: Literal["image", "video", "any"] = "any"
+    directory_path: str | None = None
+    date_from: datetime | None = None
+    date_to: datetime | None = None
+    limit: int = Field(default=30, ge=1, le=100)
+    candidate_k: int = Field(default=200, ge=1, le=1000)
+
+
+class SearchMessageRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    conversation_id: uuid.UUID
+    role: Literal["user", "assistant", "system"]
+    content: str
+    blocks: Any = None
+    tool_events: Any = None
+    error_message: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class SearchConversationSummaryRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    title: str | None
+    last_message_at: datetime
+    created_at: datetime
+    updated_at: datetime
+
+
+class SearchConversationRead(SearchConversationSummaryRead):
+    messages: list[SearchMessageRead] = Field(default_factory=list)
 
 
 class OllamaStatusResponse(BaseModel):

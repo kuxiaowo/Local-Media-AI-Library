@@ -47,10 +47,9 @@ class RuntimeSettings(BaseModel):
     default_embedding_model: str = Field(min_length=1)
     default_ai_search_model: str = Field(min_length=1)
     max_image_long_edge: int = Field(ge=256, le=4096)
-    scan_worker_concurrency: int = Field(ge=1, le=8)
-    metadata_worker_concurrency: int = Field(ge=1, le=32)
-    vision_worker_concurrency: int = Field(ge=1, le=4)
-    embedding_worker_concurrency: int = Field(ge=1, le=16)
+    scan_worker_concurrency: int = Field(ge=1)
+    metadata_worker_concurrency: int = Field(ge=1)
+    vision_worker_concurrency: int = Field(ge=1)
 
     @field_validator("default_embedding_model")
     @classmethod
@@ -104,7 +103,6 @@ def runtime_settings() -> RuntimeSettings:
         scan_worker_concurrency=settings.scan_worker_concurrency,
         metadata_worker_concurrency=settings.metadata_worker_concurrency,
         vision_worker_concurrency=settings.vision_worker_concurrency,
-        embedding_worker_concurrency=settings.embedding_worker_concurrency,
     )
 
 
@@ -119,7 +117,6 @@ def update_runtime_settings(payload: RuntimeSettings, request: Request) -> Runti
             "SCAN_WORKER_CONCURRENCY": str(payload.scan_worker_concurrency),
             "METADATA_WORKER_CONCURRENCY": str(payload.metadata_worker_concurrency),
             "VISION_WORKER_CONCURRENCY": str(payload.vision_worker_concurrency),
-            "EMBEDDING_WORKER_CONCURRENCY": str(payload.embedding_worker_concurrency),
         },
     )
     get_settings.cache_clear()

@@ -45,17 +45,18 @@ def retry_job(job_id: uuid.UUID, db: Session = Depends(get_db)) -> Job:
     payload = dict(job.payload or {})
     if job.job_type == "analyze_video":
         payload["resume_segments"] = True
-    _prepare_target_media_for_retry(db, job)
+    retry_job_type = "reanalyze_media" if job.job_type == "generate_embedding" else job.job_type
+    _prepare_target_media_for_retry(db, retry_job_type, job)
     return create_job(
         db,
-        job_type=job.job_type,
+        job_type=retry_job_type,
         target_id=job.target_id,
         target_path=job.target_path,
         payload=payload,
     )
 
 
-def _prepare_target_media_for_retry(db: Session, job: Job) -> None:
+def _prepare_target_media_for_retry(db: Session, retry_job_type: str, job: Job) -> None:
     if job.target_id is None:
         return
     media = db.get(MediaFile, job.target_id)
@@ -66,11 +67,10 @@ def _prepare_target_media_for_retry(db: Session, job: Job) -> None:
         "extract_metadata": "pending",
         "analyze_image": "metadata_done",
         "analyze_video": "metadata_done",
-        "generate_embedding": "embedding_pending",
         "reanalyze_media": "needs_reanalysis",
         "reanalyze_video_summary": "embedding_pending",
     }
-    retry_status = retry_status_by_job_type.get(job.job_type)
+    retry_status = retry_status_by_job_type.get(retry_job_type)
     if retry_status is None:
         return
 

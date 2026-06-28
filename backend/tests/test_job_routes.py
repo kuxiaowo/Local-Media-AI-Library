@@ -87,7 +87,7 @@ def test_retry_media_job_clears_failed_media_state() -> None:
     assert media.error_message is None
 
 
-def test_retry_embedding_job_restores_embedding_pending_state() -> None:
+def test_retry_legacy_embedding_job_queues_reanalysis() -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
     Base.metadata.create_all(engine)
     SessionLocal = sessionmaker(bind=engine, future=True)
@@ -113,8 +113,9 @@ def test_retry_embedding_job_restores_embedding_pending_state() -> None:
         db.commit()
         db.refresh(failed_job)
 
-        retry_job(failed_job.id, db=db)
+        retry = retry_job(failed_job.id, db=db)
         db.refresh(media)
 
-    assert media.status == "embedding_pending"
+    assert retry.job_type == "reanalyze_media"
+    assert media.status == "needs_reanalysis"
     assert media.error_message is None

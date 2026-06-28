@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { ChevronDown, ChevronLeft, ChevronRight, Folder, FolderCog, FolderOpen, RefreshCw } from 'lucide-react';
@@ -55,31 +55,30 @@ export function MediaBrowserPage() {
     () => findDirectoryNode(directoryTree, selectedDirectoryPath),
     [directoryTree, selectedDirectoryPath],
   );
-  const selectedAncestorPaths = useMemo(
-    () => findDirectoryAncestorPaths(directoryTree, selectedDirectoryPath) ?? [],
-    [directoryTree, selectedDirectoryPath],
-  );
   const [collapsedPaths, setCollapsedPaths] = useState<Set<string>>(() => new Set());
+  const knownCollapsiblePaths = useRef<Set<string>>(new Set());
   const allDirectoryMediaCount = useMemo(
     () => directoryTree.reduce((total, node) => total + node.totalMediaCount, 0),
     [directoryTree],
   );
 
   useEffect(() => {
-    if (selectedAncestorPaths.length === 0) {
+    const collapsiblePaths = collectCollapsibleDirectoryPaths(directoryTree);
+    const newPaths = collapsiblePaths.filter((path) => !knownCollapsiblePaths.current.has(path));
+    if (newPaths.length === 0) {
       return;
+    }
+    for (const path of newPaths) {
+      knownCollapsiblePaths.current.add(path);
     }
     setCollapsedPaths((current) => {
       const next = new Set(current);
-      let changed = false;
-      for (const path of selectedAncestorPaths) {
-        if (next.delete(path)) {
-          changed = true;
-        }
+      for (const path of newPaths) {
+        next.add(path);
       }
-      return changed ? next : current;
+      return next;
     });
-  }, [selectedAncestorPaths]);
+  }, [directoryTree]);
 
   const query = useQuery({
     queryKey: ['media', page, mediaType, status, selectedDirectoryPath],
@@ -104,10 +103,6 @@ export function MediaBrowserPage() {
   function toggleDirectoryCollapsed(path: string) {
     setCollapsedPaths((current) => {
       const next = new Set(current);
-      if (selectedAncestorPaths.includes(path)) {
-        next.delete(path);
-        return next;
-      }
       if (next.has(path)) {
         next.delete(path);
       } else {
@@ -490,24 +485,15 @@ function findDirectoryNode(nodes: DirectoryTreeNode[], path: string | null): Dir
   return null;
 }
 
-function findDirectoryAncestorPaths(
-  nodes: DirectoryTreeNode[],
-  path: string | null,
-  ancestors: string[] = [],
-): string[] | null {
-  if (!path) {
-    return null;
-  }
+function collectCollapsibleDirectoryPaths(nodes: DirectoryTreeNode[]): string[] {
+  const paths: string[] = [];
   for (const node of nodes) {
-    if (node.path === path) {
-      return ancestors;
+    if (node.children.length > 0) {
+      paths.push(node.path);
     }
-    const childAncestors = findDirectoryAncestorPaths(node.children, path, [...ancestors, node.path]);
-    if (childAncestors) {
-      return childAncestors;
-    }
+    paths.push(...collectCollapsibleDirectoryPaths(node.children));
   }
-  return null;
+  return paths;
 }
 
 function directoryLabel(node: DirectoryTreeNode) {

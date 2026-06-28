@@ -231,3 +231,38 @@ class Job(Base):
     )
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class SearchConversation(Base, TimestampMixin):
+    __tablename__ = "search_conversations"
+
+    id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=uuid.uuid4)
+    title: Mapped[str | None] = mapped_column(Text)
+    last_message_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    messages: Mapped[list[SearchMessage]] = relationship(
+        "SearchMessage",
+        back_populates="conversation",
+        cascade="all, delete-orphan",
+        order_by="SearchMessage.created_at",
+    )
+
+
+class SearchMessage(Base, TimestampMixin):
+    __tablename__ = "search_messages"
+
+    id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=uuid.uuid4)
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(), ForeignKey("search_conversations.id", ondelete="CASCADE"), nullable=False
+    )
+    role: Mapped[str] = mapped_column(String(16), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    blocks: Mapped[list | dict | None] = mapped_column(JSON)
+    tool_events: Mapped[list | dict | None] = mapped_column(JSON)
+    error_message: Mapped[str | None] = mapped_column(Text)
+
+    conversation: Mapped[SearchConversation] = relationship(
+        "SearchConversation", back_populates="messages"
+    )

@@ -40,7 +40,6 @@ class Settings(BaseSettings):
     scan_worker_concurrency: int = 1
     metadata_worker_concurrency: int = 6
     vision_worker_concurrency: int = 1
-    embedding_worker_concurrency: int = 2
     cors_origins: list[str] = Field(
         default_factory=lambda: [
             "http://localhost:5173",

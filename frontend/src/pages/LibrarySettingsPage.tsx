@@ -1,9 +1,11 @@
-import { FormEvent, useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import type { FormEvent, ReactNode } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useSearchParams } from 'react-router-dom';
 import {
   ChevronDown,
   ChevronRight,
+  ChevronUp,
   Folder,
   FolderOpen,
   FolderPlus,
@@ -61,6 +63,8 @@ type ToggleEnabledVariables = {
   previousForm: DirectoryRulePayload;
 };
 
+type ExpandedDirectoryAction = 'scan' | 'ai' | 'oneClick' | null;
+
 function createDefaultPayload(
   defaults: DirectoryRuleDefaults = fallbackDirectoryRuleDefaults,
   prompts: PromptDefaults = {},
@@ -99,6 +103,7 @@ export function LibrarySettingsPage() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [form, setForm] = useState<DirectoryRulePayload>(() => createDefaultPayload());
   const [appliedSettingsTarget, setAppliedSettingsTarget] = useState<string | null>(null);
+  const [expandedAction, setExpandedAction] = useState<ExpandedDirectoryAction>(null);
   const rulesQuery = useQuery({ queryKey: ['directory-rules'], queryFn: listDirectoryRules });
   const modelsQuery = useQuery({ queryKey: ['ollama-models'], queryFn: getOllamaModels });
   const directoryDefaultsQuery = useQuery({
@@ -150,27 +155,26 @@ export function LibrarySettingsPage() {
     [rulesQuery.data, selectedId],
   );
   const ruleTree = useMemo(() => buildDirectoryRuleTree(rulesQuery.data ?? []), [rulesQuery.data]);
-  const selectedRuleAncestorPaths = useMemo(
-    () => findRuleAncestorPaths(ruleTree, selected?.normalized_path ?? null) ?? [],
-    [ruleTree, selected?.normalized_path],
-  );
   const [collapsedRulePaths, setCollapsedRulePaths] = useState<Set<string>>(() => new Set());
+  const knownCollapsibleRulePaths = useRef<Set<string>>(new Set());
 
   useEffect(() => {
-    if (selectedRuleAncestorPaths.length === 0) {
+    const collapsiblePaths = collectCollapsibleRulePaths(ruleTree);
+    const newPaths = collapsiblePaths.filter((path) => !knownCollapsibleRulePaths.current.has(path));
+    if (newPaths.length === 0) {
       return;
+    }
+    for (const path of newPaths) {
+      knownCollapsibleRulePaths.current.add(path);
     }
     setCollapsedRulePaths((current) => {
       const next = new Set(current);
-      let changed = false;
-      for (const path of selectedRuleAncestorPaths) {
-        if (next.delete(path)) {
-          changed = true;
-        }
+      for (const path of newPaths) {
+        next.add(path);
       }
-      return changed ? next : current;
+      return next;
     });
-  }, [selectedRuleAncestorPaths]);
+  }, [ruleTree]);
 
   function invalidateProcessingQueries() {
     queryClient.invalidateQueries({ queryKey: ['directory-rules'] });
@@ -206,12 +210,30 @@ export function LibrarySettingsPage() {
     mutationFn: (id: string) => startScan({ directoryRuleId: id, mode: 'incremental', runAi: false }),
     onSuccess: invalidateProcessingQueries,
   });
-  const regenerateMutation = useMutation({
-    mutationFn: (id: string) => startScan({ directoryRuleId: id, mode: 'full', runAi: true }),
+  const fullScanMutation = useMutation({
+    mutationFn: (id: string) => startScan({ directoryRuleId: id, mode: 'full', runAi: false }),
     onSuccess: invalidateProcessingQueries,
   });
   const generateAiMutation = useMutation({
-    mutationFn: (id: string) => generateAiRecords({ directoryRuleId: id }),
+    mutationFn: (id: string) => generateAiRecords({ directoryRuleId: id, mode: 'missing' }),
+    onSuccess: invalidateProcessingQueries,
+  });
+  const regenerateAiMutation = useMutation({
+    mutationFn: (id: string) => generateAiRecords({ directoryRuleId: id, mode: 'all_known' }),
+    onSuccess: invalidateProcessingQueries,
+  });
+  const oneClickGenerateMutation = useMutation({
+    mutationFn: async (id: string) => {
+      const [scanJobs, aiJobs] = await Promise.all([
+        startScan({ directoryRuleId: id, mode: 'incremental', runAi: true }),
+        generateAiRecords({ directoryRuleId: id, mode: 'missing' }),
+      ]);
+      return [...scanJobs, ...aiJobs];
+    },
+    onSuccess: invalidateProcessingQueries,
+  });
+  const fullOneClickGenerateMutation = useMutation({
+    mutationFn: (id: string) => startScan({ directoryRuleId: id, mode: 'full', runAi: true }),
     onSuccess: invalidateProcessingQueries,
   });
   const browseMutation = useMutation({
@@ -347,10 +369,6 @@ export function LibrarySettingsPage() {
   function toggleRuleCollapsed(path: string) {
     setCollapsedRulePaths((current) => {
       const next = new Set(current);
-      if (selectedRuleAncestorPaths.includes(path)) {
-        next.delete(path);
-        return next;
-      }
       if (next.has(path)) {
         next.delete(path);
       } else {
@@ -699,8 +717,11 @@ export function LibrarySettingsPage() {
           {(saveMutation.error ||
             deleteMutation.error ||
             scanMutation.error ||
-            regenerateMutation.error ||
+            fullScanMutation.error ||
             generateAiMutation.error ||
+            regenerateAiMutation.error ||
+            oneClickGenerateMutation.error ||
+            fullOneClickGenerateMutation.error ||
             browseMutation.error ||
             toggleEnabledMutation.error) && (
             <div className="mt-4 whitespace-pre-line rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700">
@@ -708,8 +729,11 @@ export function LibrarySettingsPage() {
                 saveMutation.error ??
                 deleteMutation.error ??
                 scanMutation.error ??
-                regenerateMutation.error ??
+                fullScanMutation.error ??
                 generateAiMutation.error ??
+                regenerateAiMutation.error ??
+                oneClickGenerateMutation.error ??
+                fullOneClickGenerateMutation.error ??
                 browseMutation.error ??
                 toggleEnabledMutation.error
               )?.message}
@@ -723,36 +747,48 @@ export function LibrarySettingsPage() {
             </button>
             {selected && (
               <>
-                <button
-                  className="btn"
-                  type="button"
-                  onClick={() => scanMutation.mutate(selected.id)}
+                <DirectoryActionButton
+                  label="扫描媒体"
+                  title="增量扫描新媒体并生成元数据和缩略图，不调用 AI"
+                  icon={<Play className="h-4 w-4" />}
+                  expanded={expandedAction === 'scan'}
                   disabled={scanMutation.isPending}
-                  title="只扫描这个目录下的媒体并生成元数据和缩略图，不调用 AI"
-                >
-                  <Play className="h-4 w-4" />
-                  扫描照片
-                </button>
-                <button
-                  className="btn"
-                  type="button"
-                  onClick={() => generateAiMutation.mutate(selected.id)}
+                  advancedDisabled={fullScanMutation.isPending}
+                  advancedLabel="重新扫描全部媒体"
+                  advancedTitle="全量扫描这个目录下的媒体并重做元数据和缩略图，不调用 AI"
+                  advancedIcon={<RefreshCw className="h-4 w-4" />}
+                  onClick={() => scanMutation.mutate(selected.id)}
+                  onToggle={() => setExpandedAction((current) => (current === 'scan' ? null : 'scan'))}
+                  onAdvancedClick={() => fullScanMutation.mutate(selected.id)}
+                />
+                <DirectoryActionButton
+                  label="生成AI记录"
+                  title="为已扫描但还没有 AI 记录的媒体排队"
+                  icon={<Sparkles className="h-4 w-4" />}
+                  expanded={expandedAction === 'ai'}
                   disabled={generateAiMutation.isPending}
-                  title="为这个目录下已扫描但未生成 AI 记录的媒体排队"
-                >
-                  <Sparkles className="h-4 w-4" />
-                  生成AI记录
-                </button>
-                <button
-                  className="btn"
-                  type="button"
-                  onClick={() => regenerateMutation.mutate(selected.id)}
-                  disabled={regenerateMutation.isPending}
-                  title="重新扫描这个目录下已记录的媒体，并重新生成元数据、AI 记录和搜索向量"
-                >
-                  <RefreshCw className="h-4 w-4" />
-                  全部重新生成
-                </button>
+                  advancedDisabled={regenerateAiMutation.isPending}
+                  advancedLabel="重新生成全部AI记录"
+                  advancedTitle="对已知媒体重新提取元数据并重新生成 AI 记录和搜索向量"
+                  advancedIcon={<RefreshCw className="h-4 w-4" />}
+                  onClick={() => generateAiMutation.mutate(selected.id)}
+                  onToggle={() => setExpandedAction((current) => (current === 'ai' ? null : 'ai'))}
+                  onAdvancedClick={() => regenerateAiMutation.mutate(selected.id)}
+                />
+                <DirectoryActionButton
+                  label="一键生成"
+                  title="增量扫描新媒体并生成 AI，同时补齐已有但缺少 AI 记录的媒体"
+                  icon={<Sparkles className="h-4 w-4" />}
+                  expanded={expandedAction === 'oneClick'}
+                  disabled={oneClickGenerateMutation.isPending}
+                  advancedDisabled={fullOneClickGenerateMutation.isPending}
+                  advancedLabel="一键全部重新生成"
+                  advancedTitle="全量扫描这个目录，并为全部媒体重新生成 AI 记录和搜索向量"
+                  advancedIcon={<RefreshCw className="h-4 w-4" />}
+                  onClick={() => oneClickGenerateMutation.mutate(selected.id)}
+                  onToggle={() => setExpandedAction((current) => (current === 'oneClick' ? null : 'oneClick'))}
+                  onAdvancedClick={() => fullOneClickGenerateMutation.mutate(selected.id)}
+                />
                 <button
                   className="btn"
                   type="button"
@@ -767,6 +803,72 @@ export function LibrarySettingsPage() {
           </div>
         </form>
       </div>
+    </div>
+  );
+}
+
+function DirectoryActionButton({
+  label,
+  title,
+  icon,
+  expanded,
+  disabled,
+  advancedDisabled,
+  advancedLabel,
+  advancedTitle,
+  advancedIcon,
+  onClick,
+  onToggle,
+  onAdvancedClick,
+}: {
+  label: string;
+  title: string;
+  icon: ReactNode;
+  expanded: boolean;
+  disabled: boolean;
+  advancedDisabled: boolean;
+  advancedLabel: string;
+  advancedTitle: string;
+  advancedIcon: ReactNode;
+  onClick: () => void;
+  onToggle: () => void;
+  onAdvancedClick: () => void;
+}) {
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="flex">
+        <button
+          className="btn rounded-r-none border-r-0"
+          type="button"
+          onClick={onClick}
+          disabled={disabled}
+          title={title}
+        >
+          {icon}
+          {label}
+        </button>
+        <button
+          className="icon-btn rounded-l-none px-0"
+          type="button"
+          onClick={onToggle}
+          aria-expanded={expanded}
+          title={expanded ? '收起全部操作' : '展开全部操作'}
+        >
+          <ChevronUp className={`h-4 w-4 transition ${expanded ? 'rotate-180' : ''}`} />
+        </button>
+      </div>
+      {expanded && (
+        <button
+          className="btn justify-start"
+          type="button"
+          onClick={onAdvancedClick}
+          disabled={advancedDisabled}
+          title={advancedTitle}
+        >
+          {advancedIcon}
+          {advancedLabel}
+        </button>
+      )}
     </div>
   );
 }
@@ -1086,25 +1188,15 @@ function compareDirectoryRuleNodes(left: DirectoryRuleTreeNode, right: Directory
   });
 }
 
-function findRuleAncestorPaths(
-  nodes: DirectoryRuleTreeNode[],
-  path: string | null,
-  ancestors: string[] = [],
-): string[] | null {
-  if (!path) {
-    return null;
-  }
-  const normalized = normalizeDirectoryPath(path);
+function collectCollapsibleRulePaths(nodes: DirectoryRuleTreeNode[]): string[] {
+  const paths: string[] = [];
   for (const node of nodes) {
-    if (node.normalized_path === normalized) {
-      return ancestors;
+    if (node.children.length > 0) {
+      paths.push(node.normalized_path);
     }
-    const childAncestors = findRuleAncestorPaths(node.children, normalized, [...ancestors, node.normalized_path]);
-    if (childAncestors) {
-      return childAncestors;
-    }
+    paths.push(...collectCollapsibleRulePaths(node.children));
   }
-  return null;
+  return paths;
 }
 
 function directoryRuleLabel(node: DirectoryRuleTreeNode) {
