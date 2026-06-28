@@ -9,7 +9,7 @@ from app.config import get_settings
 from app.models.db_models import EmbeddingProfile, MediaAiSummary, MediaEmbedding, MediaFile
 from app.models.schemas import ChatStreamRequest
 from app.services.agent.types import AgentPlan, MediaCandidate, QueryExpansion, Scope
-from app.services.agent.utils import directory_filter
+from app.services.agent.utils import comparable_datetime, datetime_sort_key, directory_filter
 from app.services.media_visibility import visible_media_filter
 from app.services.ollama_client import OllamaClient
 from app.services.search_rerank import keyword_score
@@ -75,7 +75,7 @@ async def retrieve_broad_candidates(
 def load_scope_media_for_summary(db: Session, scope: Scope, *, limit: int | None = None) -> list[MediaCandidate]:
     rows = _load_scoped_rows(db, scope, include_embedding=False)
     candidates = [_candidate_from_row(media, summary, score=0.0, reason="范围内已分析媒体") for media, summary, _embedding in rows]
-    candidates.sort(key=lambda item: (item.captured_at is None, item.captured_at), reverse=True)
+    candidates.sort(key=lambda item: (item.captured_at is not None, datetime_sort_key(item.captured_at)), reverse=True)
     return candidates[:limit] if limit else candidates
 
 
@@ -191,10 +191,13 @@ def _best_vector_score(query_vectors: list[list[float]], embedding: list[float] 
 def _time_score(media: MediaFile, scope: Scope) -> float:
     if scope.date_from is None and scope.date_to is None:
         return 0.5
-    if media.captured_at is None:
+    captured_at = comparable_datetime(media.captured_at)
+    date_from = comparable_datetime(scope.date_from)
+    date_to = comparable_datetime(scope.date_to)
+    if captured_at is None:
         return 0.0
-    if scope.date_from is not None and media.captured_at < scope.date_from:
+    if date_from is not None and captured_at < date_from:
         return 0.0
-    if scope.date_to is not None and media.captured_at > scope.date_to:
+    if date_to is not None and captured_at > date_to:
         return 0.0
     return 1.0

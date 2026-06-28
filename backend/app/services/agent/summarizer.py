@@ -9,7 +9,7 @@ from app.models.schemas import ChatStreamRequest
 from app.services.agent.evidence_builder import build_evidence
 from app.services.agent.retrieval import load_scope_media_for_summary
 from app.services.agent.types import AgentPlan, JudgeResult, Scope
-from app.services.agent.utils import clean_text, clip_text
+from app.services.agent.utils import clean_text, clip_text, comparable_datetime
 from app.services.ollama_client import OllamaClient
 
 
@@ -67,7 +67,11 @@ async def summarize_scope(
     stats.setdefault("checked_count", len(candidates))
     stats.setdefault("image_count", sum(1 for candidate in candidates if candidate.media_type == "image"))
     stats.setdefault("video_count", sum(1 for candidate in candidates if candidate.media_type == "video"))
-    dates = [candidate.captured_at for candidate in candidates if candidate.captured_at is not None]
+    dates = []
+    for candidate in candidates:
+        captured_at = comparable_datetime(candidate.captured_at)
+        if captured_at is not None:
+            dates.append(captured_at)
     if dates:
         stats.setdefault("date_min", min(dates).isoformat())
         stats.setdefault("date_max", max(dates).isoformat())

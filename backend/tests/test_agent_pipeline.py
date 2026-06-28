@@ -148,6 +148,32 @@ def test_validator_filters_fabricated_wrong_type_out_of_scope_and_duplicates() -
     assert validated.selected[0]["score"] == 1.0
 
 
+def test_validator_handles_mixed_timezone_awareness() -> None:
+    media_id = uuid.uuid4()
+    candidates = [_candidate(media_id, media_type="image", parent_dir="f:/photos/current")]
+    evidence = [
+        {
+            **_evidence(media_id, media_type="image", parent_dir="f:/photos/current"),
+            "captured_at": "2025-07-01T08:00:00+00:00",
+        }
+    ]
+    result = JudgeResult(
+        selected=[{"media_id": str(media_id), "score": 0.8, "reason": "ok", "confidence": 0.8}],
+        stats={},
+    )
+
+    validated = validate_judge_result(
+        result,
+        candidates=candidates,
+        evidence_items=evidence,
+        plan=AgentPlan(output_mode="media_grid"),
+        scope=Scope(date_from=datetime(2025, 7, 1), date_to=datetime(2025, 7, 2)),
+        limit=10,
+    )
+
+    assert [item["media_id"] for item in validated.selected] == [str(media_id)]
+
+
 def test_summarize_agent_turn_does_not_need_vector_retrieval(monkeypatch) -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
     Base.metadata.create_all(engine)

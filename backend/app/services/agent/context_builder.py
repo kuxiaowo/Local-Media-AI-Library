@@ -20,7 +20,7 @@ from app.services.agent.types import (
     RuntimeContext,
     UiContext,
 )
-from app.services.agent.utils import clean_text, clip_text, directory_name
+from app.services.agent.utils import clean_text, clip_text, comparable_datetime, directory_name
 from app.services.media_visibility import effective_enabled_rules, visible_media_filter
 
 
@@ -131,6 +131,8 @@ def _root_context(db: Session, rule: DirectoryRule) -> LibraryRootContext:
             failed_count += count
         else:
             pending_count += count
+        row_min = comparable_datetime(row_min)
+        row_max = comparable_datetime(row_max)
         if row_min is not None and (date_min is None or row_min < date_min):
             date_min = row_min
         if row_max is not None and (date_max is None or row_max > date_max):

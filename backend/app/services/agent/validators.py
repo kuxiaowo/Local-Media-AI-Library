@@ -5,7 +5,7 @@ from typing import Any
 
 from app.core.path_utils import path_has_prefix
 from app.services.agent.types import AgentPlan, JudgeResult, MediaCandidate, Scope
-from app.services.agent.utils import clamp_score, clean_text
+from app.services.agent.utils import clamp_score, clean_text, comparable_datetime
 
 
 def validate_judge_result(
@@ -94,12 +94,16 @@ def _within_directories(
 def _within_time(evidence: dict[str, Any], candidate: MediaCandidate | None, scope: Scope) -> bool:
     if scope.date_from is None and scope.date_to is None:
         return True
-    captured_at = _parse_evidence_datetime(evidence.get("captured_at")) or (candidate.captured_at if candidate else None)
+    captured_at = comparable_datetime(
+        _parse_evidence_datetime(evidence.get("captured_at")) or (candidate.captured_at if candidate else None)
+    )
+    date_from = comparable_datetime(scope.date_from)
+    date_to = comparable_datetime(scope.date_to)
     if captured_at is None:
         return False
-    if scope.date_from is not None and captured_at < scope.date_from:
+    if date_from is not None and captured_at < date_from:
         return False
-    if scope.date_to is not None and captured_at > scope.date_to:
+    if date_to is not None and captured_at > date_to:
         return False
     return True
 

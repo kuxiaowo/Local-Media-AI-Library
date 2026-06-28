@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 _QUERY_SPLIT_RE = re.compile(r"[\s,，.。;；:：、!?！？]+")
@@ -52,6 +52,9 @@ def keyword_score(query: str, text: str) -> float:
 def time_score(captured_at: datetime | None, start: datetime | None, end: datetime | None) -> float:
     if start is None and end is None:
         return 0.0
+    captured_at = _comparable_datetime(captured_at)
+    start = _comparable_datetime(start)
+    end = _comparable_datetime(end)
     if captured_at is None:
         return 0.0
     if start is not None and captured_at < start:
@@ -59,6 +62,14 @@ def time_score(captured_at: datetime | None, start: datetime | None, end: dateti
     if end is not None and captured_at > end:
         return 0.0
     return 1.0
+
+
+def _comparable_datetime(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is not None and value.utcoffset() is not None:
+        return value.astimezone(timezone.utc).replace(tzinfo=None)
+    return value
 
 
 def final_score(item: RerankInput) -> float:

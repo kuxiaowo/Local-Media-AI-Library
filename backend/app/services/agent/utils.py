@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 import uuid
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import or_
@@ -62,6 +62,18 @@ def parse_datetime(value: object, *, end_of_day: bool = False) -> datetime | Non
         return datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError:
         return None
+
+
+def comparable_datetime(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is not None and value.utcoffset() is not None:
+        return value.astimezone(timezone.utc).replace(tzinfo=None)
+    return value
+
+
+def datetime_sort_key(value: datetime | None) -> datetime:
+    return comparable_datetime(value) or datetime.min
 
 
 def recent_range(today: str, days: int) -> tuple[datetime | None, datetime | None]:
