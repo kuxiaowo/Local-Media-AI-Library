@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -51,10 +51,19 @@ def get_search_conversation(conversation_id: uuid.UUID, db: Session = Depends(ge
         .where(SearchConversation.id == conversation_id)
     )
     if conversation is None:
-        from fastapi import HTTPException
-
         raise HTTPException(status_code=404, detail="Conversation not found")
     return conversation
+
+
+@router.delete("/conversations/{conversation_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_search_conversation(conversation_id: uuid.UUID, db: Session = Depends(get_db)) -> Response:
+    conversation = db.get(SearchConversation, conversation_id)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    db.delete(conversation)
+    db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.post("/chat/stream")

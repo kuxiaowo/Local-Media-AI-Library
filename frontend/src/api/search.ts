@@ -32,6 +32,12 @@ export function getSearchConversation(conversationId: string) {
   return apiRequest<SearchConversation>(`/api/search/conversations/${conversationId}`);
 }
 
+export function deleteSearchConversation(conversationId: string) {
+  return apiRequest<void>(`/api/search/conversations/${conversationId}`, {
+    method: 'DELETE',
+  });
+}
+
 export async function streamSearchChat(
   payload: ChatStreamPayload,
   onEvent: (event: ChatStreamEvent) => void,

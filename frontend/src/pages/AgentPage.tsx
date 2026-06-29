@@ -1,8 +1,8 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { Bot, Image as ImageIcon, Loader2, MessageSquare, Plus, Send, User, Video, Wrench } from 'lucide-react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { Bot, Image as ImageIcon, Loader2, MessageSquare, Plus, Send, Trash2, User, Video, Wrench } from 'lucide-react';
 import { Link, useLocation, useSearchParams } from 'react-router-dom';
-import { getSearchConversation, listSearchConversations, streamSearchChat } from '../api/search';
+import { deleteSearchConversation, getSearchConversation, listSearchConversations, streamSearchChat } from '../api/search';
 import { listMediaDirectories } from '../api/media';
 import { API_BASE } from '../api/client';
 import type {
@@ -54,6 +54,16 @@ export function AgentPage() {
     queryKey: ['search-conversation', activeConversationId],
     queryFn: () => getSearchConversation(activeConversationId!),
     enabled: Boolean(activeConversationId),
+  });
+  const deleteConversationMutation = useMutation({
+    mutationFn: (conversationId: string) => deleteSearchConversation(conversationId),
+    onSuccess: async (_data, conversationId) => {
+      queryClient.removeQueries({ queryKey: ['search-conversation', conversationId] });
+      await queryClient.invalidateQueries({ queryKey: ['search-conversations'] });
+      if (conversationId === activeConversationId) {
+        newConversation();
+      }
+    },
   });
 
   useEffect(() => {
@@ -242,6 +252,13 @@ export function AgentPage() {
     setStreamError(null);
   }
 
+  function deleteConversation(conversationId: string) {
+    if (!window.confirm('确定删除这个对话？删除后无法恢复。')) {
+      return;
+    }
+    deleteConversationMutation.mutate(conversationId);
+  }
+
   return (
     <div className="grid gap-4 lg:grid-cols-[260px_1fr]">
       <aside className="panel h-fit p-3">
@@ -256,29 +273,54 @@ export function AgentPage() {
         </div>
 
         <div className="space-y-1">
-          {(conversationsQuery.data ?? []).map((conversation) => (
-            <button
-              key={conversation.id}
-              className={[
-                'w-full rounded-md px-2 py-2 text-left text-sm transition',
-                conversation.id === activeConversationId
-                  ? 'bg-accent text-white'
-                  : 'text-slate-700 hover:bg-slate-100',
-              ].join(' ')}
-              type="button"
-              onClick={() => {
-                const next = new URLSearchParams(searchParams);
-                next.set('c', conversation.id);
-                next.delete('q');
-                setSearchParams(next);
-              }}
-            >
-              <div className="truncate font-medium">{conversation.title || '未命名对话'}</div>
-              <div className={conversation.id === activeConversationId ? 'text-xs text-white/75' : 'text-xs text-slate-400'}>
-                {formatDateTime(conversation.last_message_at)}
+          {(conversationsQuery.data ?? []).map((conversation) => {
+            const isActive = conversation.id === activeConversationId;
+            const isDeleting = deleteConversationMutation.isPending && deleteConversationMutation.variables === conversation.id;
+            const deleteDisabled = isStreaming || deleteConversationMutation.isPending;
+
+            return (
+              <div
+                key={conversation.id}
+                className={[
+                  'group flex items-center rounded-md transition',
+                  isActive ? 'bg-accent text-white' : 'text-slate-700 hover:bg-slate-100',
+                ].join(' ')}
+              >
+                <button
+                  className="min-w-0 flex-1 px-2 py-2 text-left text-sm"
+                  type="button"
+                  onClick={() => {
+                    const next = new URLSearchParams(searchParams);
+                    next.set('c', conversation.id);
+                    next.delete('q');
+                    setSearchParams(next);
+                  }}
+                >
+                  <div className="truncate font-medium">{conversation.title || '未命名对话'}</div>
+                  <div className={isActive ? 'text-xs text-white/75' : 'text-xs text-slate-400'}>
+                    {formatDateTime(conversation.last_message_at)}
+                  </div>
+                </button>
+                <button
+                  className={[
+                    'mr-1 grid h-8 w-8 shrink-0 place-items-center rounded-md transition',
+                    isActive ? 'text-white/75 hover:bg-white/15 hover:text-white' : 'text-slate-400 hover:bg-white hover:text-red-600',
+                  ].join(' ')}
+                  type="button"
+                  title="删除对话"
+                  aria-label="删除对话"
+                  disabled={deleteDisabled}
+                  onClick={() => deleteConversation(conversation.id)}
+                >
+                  {isDeleting ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <Trash2 className="h-4 w-4" />
+                  )}
+                </button>
               </div>
-            </button>
-          ))}
+            );
+          })}
           {conversationsQuery.data?.length === 0 && (
             <div className="rounded-md border border-dashed border-line p-3 text-xs text-slate-500">暂无历史对话</div>
           )}
