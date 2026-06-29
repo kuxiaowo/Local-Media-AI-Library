@@ -10,6 +10,7 @@ import type {
   ChatStreamEvent,
   ClarificationAssistantBlock,
   MediaGridAssistantBlock,
+  SearchConversation,
   QuestionAnswerAssistantBlock,
   SearchMessage,
   SearchResultItem,
@@ -41,6 +42,7 @@ export function AgentPage() {
   const [isStreaming, setIsStreaming] = useState(false);
   const [streamError, setStreamError] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
+  const streamingConversationIdRef = useRef<string | null>(null);
 
   const directoriesQuery = useQuery({
     queryKey: ['media-directories'],
@@ -95,6 +97,7 @@ export function AgentPage() {
     setInput('');
     setStreamError(null);
     setIsStreaming(true);
+    streamingConversationIdRef.current = activeConversationId;
     try {
       await streamSearchChat(
         {
@@ -131,9 +134,10 @@ export function AgentPage() {
         },
         handleStreamEvent,
       );
+      const streamedConversationId = streamingConversationIdRef.current ?? activeConversationId;
       await queryClient.invalidateQueries({ queryKey: ['search-conversations'] });
-      if (activeConversationId) {
-        await queryClient.invalidateQueries({ queryKey: ['search-conversation', activeConversationId] });
+      if (streamedConversationId) {
+        await queryClient.invalidateQueries({ queryKey: ['search-conversation', streamedConversationId] });
       }
     } catch (error) {
       const messageText = error instanceof Error ? error.message : String(error);
@@ -144,12 +148,17 @@ export function AgentPage() {
       ]);
     } finally {
       setIsStreaming(false);
+      streamingConversationIdRef.current = null;
     }
   }
 
   function handleStreamEvent(event: ChatStreamEvent) {
     if (event.event === 'conversation') {
       const conversationId = stringValue(event.data.conversation_id);
+      if (conversationId) {
+        streamingConversationIdRef.current = conversationId;
+        ensureConversationCache(conversationId);
+      }
       if (conversationId && conversationId !== activeConversationId) {
         setSearchParams((current) => {
           const next = new URLSearchParams(current);
@@ -164,7 +173,9 @@ export function AgentPage() {
     if (event.event === 'user_message') {
       const message = event.data.message as SearchMessage | undefined;
       if (message) {
-        setMessages((current) => [...removePendingAssistant(current), message as ChatMessage]);
+        streamingConversationIdRef.current = message.conversation_id;
+        cacheConversationMessage(message);
+        setMessages((current) => upsertChatMessage(removePendingAssistant(current), message as ChatMessage));
       }
       return;
     }
@@ -230,7 +241,9 @@ export function AgentPage() {
     if (event.event === 'done') {
       const message = event.data.message as SearchMessage | undefined;
       if (message) {
-        setMessages((current) => [...removePendingAssistant(current), message as ChatMessage]);
+        streamingConversationIdRef.current = message.conversation_id;
+        cacheConversationMessage(message);
+        setMessages((current) => upsertChatMessage(removePendingAssistant(current), message as ChatMessage));
       }
       return;
     }
@@ -246,6 +259,7 @@ export function AgentPage() {
   }
 
   function newConversation() {
+    streamingConversationIdRef.current = null;
     setSearchParams(new URLSearchParams());
     setMessages([]);
     setInput('');
@@ -257,6 +271,42 @@ export function AgentPage() {
       return;
     }
     deleteConversationMutation.mutate(conversationId);
+  }
+
+  function ensureConversationCache(conversationId: string) {
+    queryClient.setQueryData<SearchConversation>(['search-conversation', conversationId], (conversation) => {
+      if (conversation) {
+        return conversation;
+      }
+      const now = new Date().toISOString();
+      return {
+        id: conversationId,
+        title: null,
+        last_message_at: now,
+        created_at: now,
+        updated_at: now,
+        messages: [],
+      };
+    });
+  }
+
+  function cacheConversationMessage(message: SearchMessage) {
+    const conversationId = message.conversation_id || streamingConversationIdRef.current;
+    if (!conversationId) {
+      return;
+    }
+
+    queryClient.setQueryData<SearchConversation>(['search-conversation', conversationId], (conversation) => {
+      const timestamp = message.created_at || new Date().toISOString();
+      return {
+        id: conversation?.id ?? conversationId,
+        title: conversation?.title ?? null,
+        last_message_at: timestamp,
+        created_at: conversation?.created_at ?? timestamp,
+        updated_at: message.updated_at || conversation?.updated_at || timestamp,
+        messages: upsertSearchMessage(conversation?.messages ?? [], message),
+      };
+    });
   }
 
   return (
@@ -586,6 +636,22 @@ function ensurePendingAssistant(messages: ChatMessage[]) {
 
 function removePendingAssistant(messages: ChatMessage[]) {
   return messages.filter((message) => !message.pending);
+}
+
+function upsertChatMessage(messages: ChatMessage[], message: ChatMessage) {
+  const index = messages.findIndex((item) => item.id === message.id);
+  if (index === -1) {
+    return [...messages, message];
+  }
+  return messages.map((item, itemIndex) => (itemIndex === index ? message : item));
+}
+
+function upsertSearchMessage(messages: SearchMessage[], message: SearchMessage) {
+  const index = messages.findIndex((item) => item.id === message.id);
+  if (index === -1) {
+    return [...messages, message];
+  }
+  return messages.map((item, itemIndex) => (itemIndex === index ? message : item));
 }
 
 function appendToolEvent(messages: ChatMessage[], event: ChatStreamEvent) {
