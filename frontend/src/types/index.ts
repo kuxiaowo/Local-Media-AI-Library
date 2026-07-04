@@ -252,7 +252,7 @@ export interface SearchResultItem {
   score: number;
 }
 
-export type SearchMode = 'vector' | 'ai';
+export type SearchMode = 'vector';
 
 export interface SearchResponse {
   query: string;

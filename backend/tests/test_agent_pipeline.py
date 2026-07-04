@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import uuid
 from datetime import datetime
 
@@ -12,6 +13,7 @@ from app.models.db_models import DirectoryRule, MediaAiSummary, MediaFile, Video
 from app.models.schemas import ChatAgentContext, ChatRuntimeContext, ChatStreamRequest, ChatUiContext
 from app.services.agent.context_builder import build_context_pack
 from app.services.agent.evidence_builder import build_evidence
+from app.services.agent.media_library_agent import _list_media_descriptions
 from app.services.agent.planner import fallback_plan, normalize_plan
 from app.services.agent.response_composer import compose_response_blocks
 from app.services.agent.scope_resolver import resolve_scope
@@ -37,6 +39,74 @@ class FakeOllama:
 
     async def embed_text(self, **_kwargs):
         raise RuntimeError("no embedding in unit test")
+
+
+class PagingThenAnswerOllama:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def generate_text_json(self, **kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            return {
+                "action": "list_media_descriptions",
+                "reason_summary": "先读取当前目录的媒体描述。",
+                "arguments": {
+                    "directory_path": "f:/photos/current",
+                    "media_type": "image",
+                    "page": 1,
+                    "page_size": 40,
+                    "sort": "captured_desc",
+                },
+                "visible_memory_update": {
+                    "known_facts": [],
+                    "checked_scopes": ["f:/photos/current 第1页"],
+                    "candidate_media_ids": [],
+                    "rejected_scopes": [],
+                },
+            }
+        prompt = kwargs.get("prompt") or ""
+        match = re.search(r'"media_id":\s*"([^"]+)"', prompt)
+        media_id = match.group(1) if match else str(uuid.uuid4())
+        return {
+            "action": "answer_now",
+            "reason_summary": "已读取足够描述，可以回答。",
+            "arguments": {
+                "answer_type": "media_selection",
+                "answer": "找到一张电脑桌面照片。",
+                "selected_media_ids": [media_id],
+                "confidence": "high",
+                "checked_scope_summary": "检查了当前目录第 1 页图片描述。",
+                "limitations": "只基于已有摘要。",
+            },
+            "visible_memory_update": {
+                "known_facts": ["当前目录包含电脑桌面照片"],
+                "checked_scopes": ["f:/photos/current 第1页"],
+                "candidate_media_ids": [media_id],
+                "rejected_scopes": [],
+            },
+        }
+
+    async def embed_text(self, **_kwargs):
+        raise RuntimeError("no embedding in unit test")
+
+
+class LoopingOllama:
+    async def generate_text_json(self, **_kwargs):
+        return {
+            "action": "search_descriptions",
+            "reason_summary": "继续检索夏天相关描述。",
+            "arguments": {"query": "夏天", "limit": 10},
+            "visible_memory_update": {
+                "known_facts": [],
+                "checked_scopes": ["global_search_2025_summer"],
+                "candidate_media_ids": [],
+                "rejected_scopes": [],
+            },
+        }
+
+    async def embed_text(self, **_kwargs):
+        raise AssertionError("max-turn fallback should not run vector embedding")
 
 
 def test_fallback_planner_identifies_core_task_types() -> None:
@@ -222,71 +292,51 @@ def test_validator_handles_mixed_timezone_awareness() -> None:
     assert [item["media_id"] for item in validated.selected] == [str(media_id)]
 
 
-def test_summarize_agent_turn_does_not_need_vector_retrieval(monkeypatch) -> None:
+def test_list_media_descriptions_filters_pages_and_caps_page_size() -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
     Base.metadata.create_all(engine)
     SessionLocal = sessionmaker(bind=engine, future=True)
 
     with SessionLocal() as db:
         _seed_media(db)
-
-        async def fail_retrieval(*_args, **_kwargs):
-            raise AssertionError("summarize should not call broad retrieval")
-
-        import app.services.conversational_search_service as service
-
-        monkeypatch.setattr(service, "retrieve_broad_candidates", fail_retrieval)
-        request = ChatStreamRequest(
-            message="总结这个文件夹主要是什么内容",
-            directory_path="F:/Photos/Current",
-            context=ChatAgentContext(
-                runtime_context=ChatRuntimeContext(today="2026-06-28"),
-                ui_context=ChatUiContext(current_directory_path="F:/Photos/Current"),
-            ),
+        result = _list_media_descriptions(
+            db,
+            ChatStreamRequest(message="找照片"),
+            {
+                "directory_path": "F:/Photos/Current",
+                "media_type": "image",
+                "page": 1,
+                "page_size": 99,
+                "sort": "captured_desc",
+            },
         )
-        events = asyncio.run(_collect_events(db, request))
 
-    assistant = [event for event in events if event.event == "assistant_message"][-1]
-    assert assistant.data["blocks"][0]["type"] == "summary"
+    payload = result["result"]
+    assert payload["page_size"] == 50
+    assert payload["total"] == 1
+    assert payload["items"][0]["media_type"] == "image"
+    assert payload["items"][0]["searchable_text"] == "电脑 桌面 屏幕 键盘 清晰"
+    assert result["candidate_media"][0]["media_id"] == payload["items"][0]["media_id"]
 
 
-def test_summer_retrospective_summary_turn_does_not_use_vector_or_media_grid(monkeypatch) -> None:
+def test_list_media_descriptions_infers_explicit_summer_date_range() -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
     Base.metadata.create_all(engine)
     SessionLocal = sessionmaker(bind=engine, future=True)
 
     with SessionLocal() as db:
-        _seed_media(
+        _seed_media(db, image_captured_at=datetime(2026, 1, 1), video_captured_at=datetime(2026, 1, 2))
+        result = _list_media_descriptions(
             db,
-            image_captured_at=datetime(2025, 7, 1),
-            video_captured_at=datetime(2025, 8, 15),
+            ChatStreamRequest(message="2025年夏天发生了什么"),
+            {"page": 1, "page_size": 40, "sort": "captured_desc"},
         )
 
-        async def fail_retrieval(*_args, **_kwargs):
-            raise AssertionError("summarize should not call broad retrieval")
-
-        import app.services.conversational_search_service as service
-
-        monkeypatch.setattr(service, "retrieve_broad_candidates", fail_retrieval)
-        request = ChatStreamRequest(
-            message="查找2025年夏天发生了什么",
-            context=ChatAgentContext(runtime_context=ChatRuntimeContext(today="2026-06-28")),
-        )
-        events = asyncio.run(_collect_events(db, request))
-
-    plan_event = [event for event in events if event.event == "plan"][-1]
-    assert plan_event.data["plan"]["task_type"] == "summarize"
-    assert plan_event.data["plan"]["output_mode"] == "summary"
-    assert plan_event.data["plan"]["should_show_media_grid"] is False
-    assert not any(event.event == "retrieval_progress" for event in events)
-
-    assistant = [event for event in events if event.event == "assistant_message"][-1]
-    block_types = [block["type"] for block in assistant.data["blocks"]]
-    assert "summary" in block_types
-    assert "media_grid" not in block_types
+    assert result["result"]["total"] == 0
+    assert result["candidate_media"] == []
 
 
-def test_question_answer_turn_does_not_force_media_grid() -> None:
+def test_media_library_agent_reads_page_then_answers_with_final_json() -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
     Base.metadata.create_all(engine)
     SessionLocal = sessionmaker(bind=engine, future=True)
@@ -294,18 +344,66 @@ def test_question_answer_turn_does_not_force_media_grid() -> None:
     with SessionLocal() as db:
         image, _video = _seed_media(db)
         request = ChatStreamRequest(
-            message="这些照片里是不是大部分是电脑桌面",
+            message="找一张电脑桌面照片",
+            directory_path="F:/Photos/Current",
             context=ChatAgentContext(
                 runtime_context=ChatRuntimeContext(today="2026-06-28"),
-                ui_context=ChatUiContext(visible_media_ids=[image.id]),
+                ui_context=ChatUiContext(current_directory_path="F:/Photos/Current"),
             ),
         )
-        events = asyncio.run(_collect_events(db, request))
+        events = asyncio.run(_collect_events(db, request, PagingThenAnswerOllama()))
 
+    action_events = [event for event in events if event.event == "agent_action"]
+    assert [event.data["action"] for event in action_events] == ["list_media_descriptions", "answer_now"]
+    assert any(event.event == "tool_result" and event.data["tool"] == "list_media_descriptions" for event in events)
+    final = [event for event in events if event.event == "final_answer"][-1].data["final_answer"]
+    assert final["answer_type"] == "media_selection"
+    assert final["selected_media_ids"] == [str(image.id)]
     assistant = [event for event in events if event.event == "assistant_message"][-1]
     block_types = [block["type"] for block in assistant.data["blocks"]]
-    assert "question_answer" in block_types
+    assert "media_grid" in block_types
+
+
+def test_media_library_agent_max_turns_does_not_vector_fallback_outside_date_range() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
+    Base.metadata.create_all(engine)
+    SessionLocal = sessionmaker(bind=engine, future=True)
+
+    with SessionLocal() as db:
+        _seed_media(db, image_captured_at=datetime(2026, 1, 1), video_captured_at=datetime(2026, 1, 2))
+        events = asyncio.run(_collect_events(db, ChatStreamRequest(message="2025年夏天发生了什么"), LoopingOllama()))
+
+    final = [event for event in events if event.event == "final_answer"][-1].data["final_answer"]
+    assert final["answer_type"] == "answer"
+    assert "selected_media_ids" not in final
+    assert "2025-06-01" in final["answer"]
+    assert "2025-08-31" in final["answer"]
+    assert "可能原因" in final["answer"]
+    assert "其他年份" in final["answer"]
+    tool_result = [event for event in events if event.event == "tool_result"][-1]
+    assert tool_result.data["tool"] == "fallback_no_media_selection"
+    assistant = [event for event in events if event.event == "assistant_message"][-1]
+    block_types = [block["type"] for block in assistant.data["blocks"]]
     assert "media_grid" not in block_types
+
+
+def test_media_library_agent_fallback_on_invalid_json_uses_keyword_search() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
+    Base.metadata.create_all(engine)
+    SessionLocal = sessionmaker(bind=engine, future=True)
+
+    with SessionLocal() as db:
+        image, _video = _seed_media(db)
+        events = asyncio.run(_collect_events(db, ChatStreamRequest(message="电脑桌面", media_type="image"), FakeOllama()))
+
+    action = [event for event in events if event.event == "agent_action"][-1]
+    assert action.data["action"] == "fallback"
+    final = [event for event in events if event.event == "final_answer"][-1].data["final_answer"]
+    assert final["confidence"] == "low"
+    assert final["selected_media_ids"] == [str(image.id)]
+    assistant = [event for event in events if event.event == "assistant_message"][-1]
+    block_types = [block["type"] for block in assistant.data["blocks"]]
+    assert "media_grid" in block_types
 
 
 def test_context_pack_falls_back_when_frontend_sends_no_context() -> None:
@@ -320,6 +418,11 @@ def test_context_pack_falls_back_when_frontend_sends_no_context() -> None:
     assert context.runtime_context.timezone == "Asia/Shanghai"
     assert context.ui_context.page == "agent"
     assert context.library_context.roots
+    assert context.library_overview["media_count"] == 2
+    assert context.directory_tree[0]["path"] == "f:/photos/current"
+    assert context.directory_stats[0]["path"] == "f:/photos/current"
+    assert context.directory_stats[0]["background_context"] == "这个目录是电脑桌面素材。"
+    assert "电脑桌面" in context.directory_stats[0]["common_keywords"]
 
 
 def test_response_blocks_filter_debug_stats_fields() -> None:
@@ -348,8 +451,8 @@ def test_response_blocks_filter_debug_stats_fields() -> None:
     assert stats_blocks == [{"type": "stats", "stats": {"checked_count": 3, "matched_count": 3}}]
 
 
-async def _collect_events(db, request: ChatStreamRequest):
-    return [event async for event in run_agent_turn_events(db, request, [], FakeOllama())]
+async def _collect_events(db, request: ChatStreamRequest, ollama=None):
+    return [event async for event in run_agent_turn_events(db, request, [], ollama or FakeOllama())]
 
 
 def _context_pack(
@@ -396,6 +499,7 @@ def _seed_media(
         recursive=True,
         vision_model="vision-model",
         summary_model="summary-model",
+        background_context="这个目录是电脑桌面素材。",
         video_frame_strategy="hybrid",
         frame_interval_seconds=5,
         max_frames_per_video=12,

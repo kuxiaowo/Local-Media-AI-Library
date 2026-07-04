@@ -9,7 +9,6 @@ from app.config import get_settings
 from app.core.path_utils import normalize_path
 from app.models.db_models import DirectoryRule, EmbeddingProfile, MediaAiSummary, MediaEmbedding, MediaFile
 from app.models.schemas import ParsedFilters, SearchRequest, SearchResponse, SearchResultItem
-from app.services.ai_search_service import search_media_with_ai
 from app.services.media_visibility import visible_media_filter
 from app.services.ollama_client import OllamaClient
 from app.services.search_rerank import RerankInput, final_score
@@ -34,9 +33,6 @@ def parse_query_filters(request: SearchRequest) -> ParsedFilters:
 
 
 async def search_media(db: Session, request: SearchRequest, ollama: OllamaClient) -> SearchResponse:
-    if request.mode == "ai":
-        return await search_media_with_ai(db, request, ollama)
-
     parsed = parse_query_filters(request)
     model_name = _select_embedding_model(db)
     if model_name is None:

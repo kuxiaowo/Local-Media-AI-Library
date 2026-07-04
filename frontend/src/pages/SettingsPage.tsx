@@ -1,6 +1,6 @@
 import { FormEvent, ReactNode, useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Braces, ChevronDown, FileJson, ImageIcon, Lock, Pencil, RefreshCw, Save, Trash2, Video } from 'lucide-react';
+import { Bot, Braces, ChevronDown, FileJson, ImageIcon, Lock, Pencil, RefreshCw, Save, Trash2, Video } from 'lucide-react';
 import { getOllamaModels, getOllamaStatus } from '../api/models';
 import {
   cleanupStaleMedia,
@@ -165,6 +165,184 @@ const finalSummaryPromptBlocks: ReadOnlyPromptBlock[] = [
   },
 ];
 
+const agentPromptBlocks: ReadOnlyPromptBlock[] = [
+  {
+    title: 'System prompt：MediaLibraryAgent',
+    description: '每一轮 action 决策都会作为 system prompt 传入，约束 Agent 只能基于已有摘要、目录、时间和背景信息工作。',
+    kind: 'fixed',
+    content: `你是本地媒体库 MediaLibraryAgent。
+你只能基于 Context Pack 和工具返回的已有文本信息回答：媒体摘要、目录信息、时间信息、背景信息、视频分段文字。
+你不能要求重新读取原图、视频、音频或缩略图，也不能假设自己看过原始媒体。
+每轮只返回一个 JSON action，不要输出 Markdown，不要输出长篇 chain-of-thought。
+reason_summary 只写一句可见的简短理由。
+
+可用 action：
+- list_directories：查看目录树，可传 query/page/page_size。
+- list_directory_info：查看目录统计，可传 directory_path 或 directory_paths，也可传 query/page/page_size。
+- list_media_descriptions：分页读取媒体描述，可传 directory_path/media_type/page/page_size/sort/date_from/date_to；page_size 最大 50。
+- search_descriptions：基于已有摘要做关键词/向量检索，可传 query/directory_path/media_type/limit/date_from/date_to。
+- select_media：从当前候选或已读描述中选择媒体，可传 media_ids。
+- answer_now：输出最终回答。arguments 必须是最终回答 JSON。
+
+最终回答 JSON：
+{
+  "answer_type": "answer | summary | media_selection",
+  "answer": "...",
+  "selected_media_ids": [],
+  "confidence": "high | medium | low",
+  "checked_scope_summary": "...",
+  "limitations": "如果信息不足，说明哪里不足"
+}
+
+选择媒体时 selected_media_ids 只能来自 Context Pack 的 read_description_pages 或 candidate_media。
+如果媒体太多，不要一次性假装已读完；先分页读取或搜索，再更新 visible_memory。
+只返回符合 schema 的 JSON。`,
+  },
+  {
+    title: 'User prompt：Action 决策请求',
+    description: '每一轮都会把用户原始问题和最新 Context Pack 拼成 user prompt，要求模型只选择下一步 action。',
+    kind: 'dynamic',
+    content: `用户原始问题：
+<request.message>
+
+Context Pack：
+<JSON.stringify(context_pack.planner_payload())>
+
+请根据当前 Context Pack 选择下一步 action。`,
+  },
+  {
+    title: '动态注入：Context Pack',
+    description: '每轮更新后传入模型。媒体描述页和候选列表只保留有限窗口，避免一次性塞入全库摘要。',
+    kind: 'dynamic',
+    content: `{
+  "current_time": {
+    "now_iso": "<当前时间>",
+    "today": "<今天日期>",
+    "timezone": "<前端或默认时区>",
+    "locale": "zh-CN",
+    "recent_default_days": 30
+  },
+  "user_question": "<用户原始问题>",
+  "visible_memory": {
+    "known_facts": [],
+    "checked_scopes": [],
+    "candidate_media_ids": [],
+    "rejected_scopes": []
+  },
+  "media_library_overview": {
+    "media_count": 0,
+    "image_count": 0,
+    "video_count": 0,
+    "directory_count": 0,
+    "earliest_captured_at": null,
+    "latest_captured_at": null
+  },
+  "directory_tree": ["<数据库目录树>"],
+  "directory_stats": [
+    {
+      "path": "<目录>",
+      "media_count": 0,
+      "image_count": 0,
+      "video_count": 0,
+      "earliest_captured_at": null,
+      "latest_captured_at": null,
+      "background_context": "<目录背景>",
+      "common_keywords": []
+    }
+  ],
+  "read_description_pages": ["<已分页读取过的媒体描述页>"],
+  "candidate_media": ["<当前候选媒体列表>"],
+  "ui_context": "<当前页面、目录、可见媒体、过滤条件>",
+  "conversation_context": "<上一轮可见结果和摘要>"
+}`,
+  },
+  {
+    title: '固定约束：Action JSON Schema',
+    description: '通过 Ollama format 字段传入。模型每轮必须返回一个 action，不允许输出自然语言散文。',
+    kind: 'fixed',
+    content: `{
+  "action": "answer_now | list_directories | list_directory_info | list_media_descriptions | search_descriptions | select_media",
+  "reason_summary": "简短说明为什么这样做",
+  "arguments": {},
+  "visible_memory_update": {
+    "known_facts": [],
+    "checked_scopes": [],
+    "candidate_media_ids": [],
+    "rejected_scopes": []
+  }
+}`,
+  },
+  {
+    title: '工具流程：目录与摘要读取',
+    description: '这些 action 由后端执行，只读数据库里已有的目录、摘要、关键词、时间和背景信息。',
+    kind: 'fixed',
+    content: `list_directories
+- 返回目录树，可按 query/page/page_size 分页。
+
+list_directory_info
+- 返回目录统计：path、media_count、image_count、video_count、earliest/latest_captured_at、background_context、common_keywords。
+
+list_media_descriptions
+- 按 directory_path/media_type/date_from/date_to/page/page_size/sort 分页读取媒体描述。
+- 默认 page_size=40，最大 50。
+- 不读取原图、原视频或缩略图。
+
+search_descriptions
+- 在已有摘要上做关键词/向量检索。
+- 如果用户问题里有明确时间范围，工具层会自动补时间过滤，避免返回范围外媒体。
+
+select_media
+- 只校验和选择已读页或候选列表中的媒体 ID。`,
+  },
+  {
+    title: '动态注入：工具结果',
+    description: '每次工具执行后写入 tool_events，并把候选媒体、已读页和 visible memory 带入下一轮。',
+    kind: 'dynamic',
+    content: `{
+  "tool": "<action>",
+  "summary": "<给用户可见的工具结果摘要>",
+  "result": {
+    "page": 1,
+    "page_size": 40,
+    "total": 0,
+    "items": ["<最多展示部分结果，完整状态在后端内存中合并>"]
+  },
+  "visible_memory": {
+    "known_facts": [],
+    "checked_scopes": [],
+    "candidate_media_ids": [],
+    "rejected_scopes": []
+  }
+}`,
+  },
+  {
+    title: '最终输出：answer_now',
+    description: '当信息足够或确认不足时，Agent 用 answer_now 输出最终 JSON；后端再转换成现有聊天 blocks 和媒体卡片。',
+    kind: 'fixed',
+    content: `{
+  "answer_type": "answer | summary | media_selection",
+  "answer": "给用户看的中文回答；如果没有找到，也要说明检查范围和原因。",
+  "selected_media_ids": ["<只有找具体照片/视频时才返回>"],
+  "confidence": "high | medium | low",
+  "checked_scope_summary": "检查过哪些目录、日期范围、页码或候选。",
+  "limitations": "信息不足时说明不足在哪里。"
+}`,
+  },
+  {
+    title: '固定保护：失败与兜底',
+    description: '避免因为模型格式失败或轮数耗尽而输出明显范围外的媒体。',
+    kind: 'fixed',
+    content: `模型 JSON 失败：
+- fallback 到已有摘要的关键词/向量检索。
+- 仍然尊重用户显式目录、媒体类型和日期范围。
+
+达到最大轮数：
+- 不再做无范围向量兜底。
+- 输出 answer 类型说明检查范围、库内时间跨度、可能原因。
+- 不返回媒体卡片，避免把其他年份的照片当成结果。`,
+  },
+];
+
 export function SettingsPage() {
   const queryClient = useQueryClient();
   const [runtimeForm, setRuntimeForm] = useState<RuntimeSettings>(emptyRuntimeSettings);
@@ -174,8 +352,9 @@ export function SettingsPage() {
   const [defaultBackgroundPromptForm, setDefaultBackgroundPromptForm] = useState('');
   const [defaultVideoSegmentPromptForm, setDefaultVideoSegmentPromptForm] = useState('');
   const [defaultVideoFinalPromptForm, setDefaultVideoFinalPromptForm] = useState('');
-  const [imagePromptsOpen, setImagePromptsOpen] = useState(true);
-  const [videoPromptsOpen, setVideoPromptsOpen] = useState(true);
+  const [imagePromptsOpen, setImagePromptsOpen] = useState(false);
+  const [videoPromptsOpen, setVideoPromptsOpen] = useState(false);
+  const [agentPromptsOpen, setAgentPromptsOpen] = useState(false);
   const statusQuery = useQuery({ queryKey: ['ollama-status'], queryFn: getOllamaStatus });
   const modelsQuery = useQuery({ queryKey: ['ollama-models'], queryFn: getOllamaModels });
   const runtimeQuery = useQuery({ queryKey: ['runtime-settings'], queryFn: getRuntimeSettings });
@@ -619,6 +798,7 @@ export function SettingsPage() {
         title="照片提示词"
         isOpen={imagePromptsOpen}
         onToggle={() => setImagePromptsOpen((current) => !current)}
+        icon={<ImageIcon className="h-4 w-4 text-signal" />}
       >
         <ImagePromptAssemblyCard
           imagePromptBlock={{
@@ -643,6 +823,7 @@ export function SettingsPage() {
         title="视频提示词"
         isOpen={videoPromptsOpen}
         onToggle={() => setVideoPromptsOpen((current) => !current)}
+        icon={<Video className="h-4 w-4 text-signal" />}
       >
         <VideoPromptAssemblyCard
           title="分段识别请求拼接"
@@ -689,6 +870,15 @@ export function SettingsPage() {
           }}
           fixedBlocks={finalSummaryPromptBlocks}
         />
+      </CollapsiblePromptGroup>
+
+      <CollapsiblePromptGroup
+        title="Agent 提示词"
+        isOpen={agentPromptsOpen}
+        onToggle={() => setAgentPromptsOpen((current) => !current)}
+        icon={<Bot className="h-4 w-4 text-signal" />}
+      >
+        <AgentPromptAssemblyCard />
       </CollapsiblePromptGroup>
 
       <form className="panel p-4" onSubmit={submitRuntime}>
@@ -850,14 +1040,17 @@ function CollapsiblePromptGroup({
   title,
   isOpen,
   onToggle,
+  icon,
   children,
 }: {
   title: string;
   isOpen: boolean;
   onToggle: () => void;
+  icon?: ReactNode;
   children: ReactNode;
 }) {
   const isVideo = title.includes('视频');
+  const groupIcon = icon ?? (isVideo ? <Video className="h-4 w-4 text-signal" /> : <ImageIcon className="h-4 w-4 text-signal" />);
   return (
     <section className="overflow-hidden rounded-lg border border-line bg-slate-50">
       <button
@@ -867,7 +1060,7 @@ function CollapsiblePromptGroup({
         onClick={onToggle}
       >
         <span className="flex min-w-0 items-center gap-2">
-          {isVideo ? <Video className="h-4 w-4 text-signal" /> : <ImageIcon className="h-4 w-4 text-signal" />}
+          {groupIcon}
           <span>{title}</span>
         </span>
         <ChevronDown className={`h-4 w-4 shrink-0 transition-transform duration-300 ${isOpen ? '' : '-rotate-90'}`} />
@@ -964,6 +1157,33 @@ function VideoPromptAssemblyCard({
         <div className="space-y-3 border-l-2 border-slate-200 pl-4">
           <EditablePromptBlock {...userBlock} />
           {fixedBlocks.map((block) => (
+            <ReadOnlyPromptBlock key={block.title} block={block} />
+          ))}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function AgentPromptAssemblyCard() {
+  return (
+    <section className="panel overflow-hidden">
+      <div className="border-b border-line bg-white px-4 py-4">
+        <div className="flex items-start gap-3">
+          <span className="mt-0.5 inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-signal/20 bg-signal/10 text-signal">
+            <FileJson className="h-4 w-4" />
+          </span>
+          <div>
+            <h2 className="text-base font-semibold">MediaLibraryAgent 请求拼接</h2>
+            <p className="mt-1 text-sm leading-6 text-slate-500">
+              每一轮调用 AI 搜索模型，只投喂 Context Pack 和工具返回的文本，不重新读取原图或视频。
+            </p>
+          </div>
+        </div>
+      </div>
+      <div className="bg-slate-50 px-4 py-4">
+        <div className="space-y-3 border-l-2 border-slate-200 pl-4">
+          {agentPromptBlocks.map((block) => (
             <ReadOnlyPromptBlock key={block.title} block={block} />
           ))}
         </div>

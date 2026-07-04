@@ -111,8 +111,11 @@ async def _chat_event_stream(payload: ChatStreamRequest):
             )
             async for event in run_agent_turn_events(db, payload, history, OllamaClient()):
                 if event.event in {
+                    "agent_action",
+                    "final_answer",
                     "tool_call",
                     "tool_result",
+                    "visible_memory",
                     "plan",
                     "scope",
                     "retrieval_progress",

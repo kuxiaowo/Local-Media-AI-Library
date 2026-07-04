@@ -262,7 +262,7 @@ class MediaQueueResponse(BaseModel):
 
 class SearchRequest(BaseModel):
     query: str
-    mode: Literal["vector", "ai"] = "vector"
+    mode: Literal["vector"] = "vector"
     media_type: Literal["image", "video", "any"] = "any"
     directory_rule_ids: list[uuid.UUID] = Field(default_factory=list)
     directory_path: str | None = None
@@ -347,7 +347,7 @@ AssistantBlock = (
 
 class SearchResponse(BaseModel):
     query: str
-    mode: Literal["vector", "ai"] = "vector"
+    mode: Literal["vector"] = "vector"
     parsed_filters: ParsedFilters
     results: list[SearchResultItem]
     answer: str | None = None

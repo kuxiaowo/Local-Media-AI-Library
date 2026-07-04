@@ -98,14 +98,45 @@ class ConversationContext:
 
 
 @dataclass(frozen=True)
+class VisibleMemory:
+    known_facts: list[str] = field(default_factory=list)
+    checked_scopes: list[str] = field(default_factory=list)
+    candidate_media_ids: list[str] = field(default_factory=list)
+    rejected_scopes: list[str] = field(default_factory=list)
+
+    def to_prompt_payload(self) -> dict[str, Any]:
+        return {
+            "known_facts": self.known_facts,
+            "checked_scopes": self.checked_scopes,
+            "candidate_media_ids": self.candidate_media_ids,
+            "rejected_scopes": self.rejected_scopes,
+        }
+
+
+@dataclass(frozen=True)
 class AgentContextPack:
     runtime_context: RuntimeContext
     library_context: LibraryContext
     ui_context: UiContext
     conversation_context: ConversationContext
+    user_question: str = ""
+    visible_memory: VisibleMemory = field(default_factory=VisibleMemory)
+    library_overview: dict[str, Any] = field(default_factory=dict)
+    directory_tree: list[dict[str, Any]] = field(default_factory=list)
+    directory_stats: list[dict[str, Any]] = field(default_factory=list)
+    read_description_pages: list[dict[str, Any]] = field(default_factory=list)
+    candidate_media: list[dict[str, Any]] = field(default_factory=list)
 
     def planner_payload(self) -> dict[str, Any]:
         return {
+            "current_time": self.runtime_context.to_prompt_payload(),
+            "user_question": self.user_question,
+            "visible_memory": self.visible_memory.to_prompt_payload(),
+            "media_library_overview": self.library_overview,
+            "directory_tree": self.directory_tree,
+            "directory_stats": self.directory_stats,
+            "read_description_pages": self.read_description_pages,
+            "candidate_media": self.candidate_media,
             "runtime_context": self.runtime_context.to_prompt_payload(),
             "library_context": self.library_context.to_prompt_payload(),
             "ui_context": self.ui_context.to_prompt_payload(),
