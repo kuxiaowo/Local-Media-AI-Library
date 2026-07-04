@@ -15,7 +15,7 @@ from app.database import SessionLocal
 from app.models.db_models import DirectoryRule, EmbeddingProfile, Job, MediaEmbedding, MediaFile
 from app.services.ai_analyzer import analyze_image, analyze_video, regenerate_video_final_summary
 from app.services.embedding_service import generate_embedding
-from app.services.job_service import mark_completed, mark_failed, mark_running
+from app.services.job_service import enqueue_job, mark_completed, mark_failed, mark_running
 from app.services.media_visibility import is_media_visible, is_rule_effectively_enabled
 from app.services.metadata_extractor import extract_image_metadata, extract_video_metadata
 from app.services.ollama_client import OllamaClient
@@ -30,6 +30,7 @@ MEDIA_JOB_TYPES = {
     "analyze_video",
     "reanalyze_video_summary",
     "reanalyze_media",
+    "generate_embedding",
 }
 ANALYSIS_JOB_TYPES = {"analyze_image", "analyze_video", "reanalyze_video_summary"}
 INTERRUPTED_ACTIVE_MEDIA_STATUSES = {
@@ -65,6 +66,7 @@ class WorkerManager:
             WorkerPoolConfig(("extract_metadata",), 6, "metadata"),
             WorkerPoolConfig(("analyze_image", "analyze_video", "reanalyze_video_summary"), 1, "vision"),
             WorkerPoolConfig(("reanalyze_media",), 1, "reanalyze"),
+            WorkerPoolConfig(("generate_embedding",), 1, "embedding"),
             WorkerPoolConfig(("cleanup_stale_media",), 1, "maintenance"),
         ]
 
@@ -79,6 +81,7 @@ class WorkerManager:
                 "vision",
             ),
             WorkerPoolConfig(("reanalyze_media",), 1, "reanalyze"),
+            WorkerPoolConfig(("generate_embedding",), settings.embedding_worker_concurrency, "embedding"),
             WorkerPoolConfig(("cleanup_stale_media",), 1, "maintenance"),
         ]
 
@@ -168,19 +171,23 @@ class WorkerManager:
         if self.is_paused():
             return
         with SessionLocal() as db:
-            jobs = db.scalars(
-                select(Job)
-                .where(Job.status == "queued", Job.job_type.in_(self._job_type_to_queue.keys()))
-                .order_by(Job.created_at.asc())
-                .limit(100)
-            ).all()
-            for job in jobs:
-                job_id = str(job.id)
-                with self._queued_lock:
-                    if job_id in self._queued_job_ids:
-                        continue
-                    self._queued_job_ids.add(job_id)
-                self._job_type_to_queue[job.job_type].put(job_id)
+            for pool in self._pools:
+                if pool.concurrency <= 0:
+                    continue
+                jobs = db.scalars(
+                    select(Job)
+                    .where(Job.status == "queued", Job.job_type.in_(pool.job_types))
+                    .order_by(Job.created_at.asc())
+                    .limit(100)
+                ).all()
+                queue = self._queues[pool.name]
+                for job in jobs:
+                    job_id = str(job.id)
+                    with self._queued_lock:
+                        if job_id in self._queued_job_ids:
+                            continue
+                        self._queued_job_ids.add(job_id)
+                    queue.put(job_id)
 
     def _worker_loop(self, queue: Queue[str], stop_event: threading.Event) -> None:
         while not stop_event.is_set():
@@ -295,7 +302,11 @@ class WorkerManager:
             else:
                 asyncio.run(analyze_image(db, media, OllamaClient()))
             if _job_row_exists(db, job.id):
-                _generate_embedding_after_analysis(db, media.id, job)
+                _queue_embedding_after_analysis(db, media.id, job)
+            return
+
+        if job.job_type == "generate_embedding":
+            _run_embedding_job(db, job)
             return
 
         if job.job_type == "reanalyze_media":
@@ -331,11 +342,15 @@ class WorkerManager:
                 )
             ).all()
             for job, media in rows:
-                if _media_has_default_embedding(db, media):
+                if _media_has_current_default_embedding(db, media):
                     mark_completed(job)
                     media.status = "done"
                     media.error_message = None
                     db.add(media)
+                    continue
+                if media.ai_summary is not None:
+                    mark_completed(job)
+                    _queue_embedding_for_media(db, media)
                     continue
                 error = "Worker was interrupted before the AI summary vector was generated"
                 mark_failed(job, error)
@@ -356,7 +371,7 @@ class WorkerManager:
                 )
             ).all()
             for job, media in rows:
-                if _media_has_default_embedding(db, media):
+                if _media_has_current_default_embedding(db, media):
                     media.status = "done"
                     media.error_message = None
                     db.add(media)
@@ -364,6 +379,14 @@ class WorkerManager:
                         job,
                         "Worker was interrupted after media already had the current embedding",
                     )
+                    continue
+                if job.job_type == "generate_embedding" and media.ai_summary is not None:
+                    error = "Worker was interrupted while generate_embedding was running"
+                    mark_failed(job, error)
+                    media.status = "embedding_pending"
+                    media.error_message = None
+                    db.add(media)
+                    _queue_embedding_for_media(db, media)
                     continue
                 error = f"Worker was interrupted while {job.job_type} was running"
                 mark_failed(job, error)
@@ -401,6 +424,7 @@ class WorkerManager:
             "analyze_video",
             "reanalyze_video_summary",
             "reanalyze_media",
+            "generate_embedding",
         }:
             return
         if job.target_id is None:
@@ -425,8 +449,8 @@ def _update_job_progress(db, job: Job, stage: str, current: int, total: int) -> 
     db.commit()
 
 
-def _generate_embedding_after_analysis(db, media_id: object, job: Job) -> None:
-    _update_job_progress(db, job, "generate_embedding", job.progress_total, job.progress_total)
+def _queue_embedding_after_analysis(db, media_id: object, job: Job) -> None:
+    _update_job_progress(db, job, "queue_embedding", job.progress_total, job.progress_total)
     if not _job_row_exists(db, job.id):
         return
     media = db.scalar(
@@ -438,7 +462,51 @@ def _generate_embedding_after_analysis(db, media_id: object, job: Job) -> None:
         raise RuntimeError("Media file does not exist")
     if not is_media_visible(db, media):
         return
+    if media.ai_summary is None:
+        raise RuntimeError("Media has no AI summary to embed")
+    _queue_embedding_for_media(db, media)
+
+
+def _run_embedding_job(db, job: Job) -> None:
+    media = db.scalar(
+        select(MediaFile)
+        .options(joinedload(MediaFile.folder_rule), joinedload(MediaFile.ai_summary))
+        .where(MediaFile.id == job.target_id)
+    )
+    if media is None:
+        raise RuntimeError("Media file does not exist")
+    if not is_media_visible(db, media):
+        return
+    if media.ai_summary is None:
+        raise RuntimeError("Media has no AI summary to embed")
+    if _media_has_current_default_embedding(db, media):
+        media.status = "done"
+        media.error_message = None
+        db.add(media)
+        db.commit()
+        return
+    _update_job_progress(db, job, "generate_embedding", 0, 1)
     asyncio.run(generate_embedding(db, media, OllamaClient()))
+    job.progress_current = 1
+    job.progress_total = 1
+
+
+def _queue_embedding_for_media(db, media: MediaFile) -> Job | None:
+    active_job_id = db.scalar(
+        select(Job.id)
+        .where(
+            Job.target_id == media.id,
+            Job.job_type == "generate_embedding",
+            Job.status.in_(("queued", "running")),
+        )
+        .limit(1)
+    )
+    media.status = "embedding_pending"
+    media.error_message = None
+    db.add(media)
+    if active_job_id is not None:
+        return None
+    return enqueue_job(db, job_type="generate_embedding", target_id=media.id, target_path=media.path)
 
 
 def _job_row_exists(db, job_id: object) -> bool:
@@ -451,21 +519,23 @@ def _mark_superseded(job: Job, reason: str) -> None:
     job.finished_at = datetime.now(timezone.utc)
 
 
-def _media_has_default_embedding(db, media: MediaFile) -> bool:
+def _media_has_current_default_embedding(db, media: MediaFile) -> bool:
     model_name = get_settings().default_embedding_model.strip()
     if not model_name:
         return db.scalar(select(MediaEmbedding.id).where(MediaEmbedding.media_id == media.id).limit(1)) is not None
     profile = db.scalar(select(EmbeddingProfile).where(EmbeddingProfile.model_name == model_name))
     if profile is None:
         return False
-    return (
-        db.scalar(
-            select(MediaEmbedding.id)
-            .where(MediaEmbedding.media_id == media.id, MediaEmbedding.profile_id == profile.id)
-            .limit(1)
-        )
-        is not None
+    embedding = db.scalar(
+        select(MediaEmbedding)
+        .where(MediaEmbedding.media_id == media.id, MediaEmbedding.profile_id == profile.id)
+        .limit(1)
     )
+    if embedding is None:
+        return False
+    if media.ai_summary is not None and embedding.embedded_text != media.ai_summary.searchable_text:
+        return False
+    return True
 
 
 def _queue_reanalysis_for_media(db, media_files: list[MediaFile], *, reason: str) -> None:

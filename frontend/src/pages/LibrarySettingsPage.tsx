@@ -106,10 +106,13 @@ export function LibrarySettingsPage() {
   const [form, setForm] = useState<DirectoryRulePayload>(() => createDefaultPayload());
   const [appliedSettingsTarget, setAppliedSettingsTarget] = useState<string | null>(null);
   const [expandedAction, setExpandedAction] = useState<ExpandedDirectoryAction>(null);
-  const rulesQuery = useQuery({ queryKey: ['directory-rules'], queryFn: listDirectoryRules });
+  const rulesQuery = useQuery({
+    queryKey: ['directory-rules'],
+    queryFn: () => listDirectoryRules({ existingOnly: true }),
+  });
   const mediaDirectoriesQuery = useQuery({
     queryKey: ['media-directories'],
-    queryFn: listMediaDirectories,
+    queryFn: () => listMediaDirectories({ existingOnly: true }),
   });
   const modelsQuery = useQuery({ queryKey: ['ollama-models'], queryFn: getOllamaModels });
   const directoryDefaultsQuery = useQuery({
@@ -206,6 +209,21 @@ export function LibrarySettingsPage() {
       queryClient.invalidateQueries({ queryKey: ['directory-rules'] });
       setSelectedId(rule.id);
       setForm((current) => ({ ...current, path: rule.path }));
+    },
+  });
+
+  const createVirtualRuleMutation = useMutation({
+    mutationFn: (path: string) =>
+      createDirectoryRule(
+        normalizedDirectoryRulePayload({
+          ...createDefaultPayload(directoryDefaults, promptDefaults),
+          path,
+        }),
+      ),
+    onSuccess: (rule) => {
+      queryClient.invalidateQueries({ queryKey: ['directory-rules'] });
+      queryClient.invalidateQueries({ queryKey: ['media-directories'] });
+      selectRule(rule);
     },
   });
 
@@ -312,11 +330,10 @@ export function LibrarySettingsPage() {
   }
 
   function selectVirtualRule(path: string) {
-    setSelectedId(null);
-    setForm({
-      ...createDefaultPayload(directoryDefaults, promptDefaults),
-      path: normalizeDisplayPath(path),
-    });
+    if (createVirtualRuleMutation.isPending) {
+      return;
+    }
+    createVirtualRuleMutation.mutate(path);
   }
 
   useEffect(() => {
@@ -452,6 +469,7 @@ export function LibrarySettingsPage() {
               selectedPath={selectedPath}
               collapsedPaths={collapsedRulePaths}
               toggleDisabled={toggleEnabledMutation.isPending}
+              virtualCreateDisabled={createVirtualRuleMutation.isPending}
               onSelect={selectRule}
               onSelectVirtual={selectVirtualRule}
               onToggleCollapsed={toggleRuleCollapsed}
@@ -745,7 +763,8 @@ export function LibrarySettingsPage() {
             oneClickGenerateMutation.error ||
             fullOneClickGenerateMutation.error ||
             browseMutation.error ||
-            toggleEnabledMutation.error) && (
+            toggleEnabledMutation.error ||
+            createVirtualRuleMutation.error) && (
             <div className="mt-4 whitespace-pre-line rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700">
               {(
                 saveMutation.error ??
@@ -757,7 +776,8 @@ export function LibrarySettingsPage() {
                 oneClickGenerateMutation.error ??
                 fullOneClickGenerateMutation.error ??
                 browseMutation.error ??
-                toggleEnabledMutation.error
+                toggleEnabledMutation.error ??
+                createVirtualRuleMutation.error
               )?.message}
             </div>
           )}
@@ -901,6 +921,7 @@ function DirectoryRuleTree({
   selectedPath,
   collapsedPaths,
   toggleDisabled,
+  virtualCreateDisabled,
   onSelect,
   onSelectVirtual,
   onToggleCollapsed,
@@ -911,6 +932,7 @@ function DirectoryRuleTree({
   selectedPath: string;
   collapsedPaths: Set<string>;
   toggleDisabled: boolean;
+  virtualCreateDisabled: boolean;
   onSelect: (rule: DirectoryRule) => void;
   onSelectVirtual: (path: string) => void;
   onToggleCollapsed: (path: string) => void;
@@ -927,6 +949,7 @@ function DirectoryRuleTree({
           selectedPath={selectedPath}
           collapsedPaths={collapsedPaths}
           toggleDisabled={toggleDisabled}
+          virtualCreateDisabled={virtualCreateDisabled}
           onSelect={onSelect}
           onSelectVirtual={onSelectVirtual}
           onToggleCollapsed={onToggleCollapsed}
@@ -944,6 +967,7 @@ function DirectoryRuleTreeItem({
   selectedPath,
   collapsedPaths,
   toggleDisabled,
+  virtualCreateDisabled,
   onSelect,
   onSelectVirtual,
   onToggleCollapsed,
@@ -955,6 +979,7 @@ function DirectoryRuleTreeItem({
   selectedPath: string;
   collapsedPaths: Set<string>;
   toggleDisabled: boolean;
+  virtualCreateDisabled: boolean;
   onSelect: (rule: DirectoryRule) => void;
   onSelectVirtual: (path: string) => void;
   onToggleCollapsed: (path: string) => void;
@@ -1038,6 +1063,7 @@ function DirectoryRuleTreeItem({
             <button
               className="icon-btn h-8 w-8"
               type="button"
+              disabled={virtualCreateDisabled}
               onClick={() => onSelectVirtual(node.path)}
               title="按默认值新建这个目录规则"
             >
@@ -1056,6 +1082,7 @@ function DirectoryRuleTreeItem({
             selectedPath={selectedPath}
             collapsedPaths={collapsedPaths}
             toggleDisabled={toggleDisabled}
+            virtualCreateDisabled={virtualCreateDisabled}
             onSelect={onSelect}
             onSelectVirtual={onSelectVirtual}
             onToggleCollapsed={onToggleCollapsed}

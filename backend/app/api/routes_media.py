@@ -61,11 +61,13 @@ def list_media(
 
 
 @router.get("/directories", response_model=list[MediaDirectoryRead])
-def list_media_directories(db: Session = Depends(get_db)) -> list[MediaDirectoryRead]:
+def list_media_directories(existing_only: bool = False, db: Session = Depends(get_db)) -> list[MediaDirectoryRead]:
     directories: dict[str, MediaDirectoryRead] = {}
 
     visibility_filter = visible_media_filter(db)
     enabled_rules = effective_enabled_rules(list(db.scalars(select(DirectoryRule)).all()))
+    if existing_only:
+        enabled_rules = [rule for rule in enabled_rules if _directory_exists(rule.path)]
 
     for rule in enabled_rules:
         _upsert_directory(
@@ -84,6 +86,8 @@ def list_media_directories(db: Session = Depends(get_db)) -> list[MediaDirectory
         if not parent_dir:
             continue
         display_path = _display_parent_path(sample_path, parent_dir)
+        if existing_only and not _directory_exists(display_path):
+            continue
         root = _longest_matching_rule(parent_dir, enabled_rules)
         _upsert_directory(
             directories,
@@ -104,6 +108,13 @@ def list_media_directories(db: Session = Depends(get_db)) -> list[MediaDirectory
             )
 
     return sorted(directories.values(), key=lambda item: item.path)
+
+
+def _directory_exists(path: str) -> bool:
+    try:
+        return Path(path).is_dir()
+    except OSError:
+        return False
 
 
 @router.get("/{media_id}", response_model=MediaDetailRead)

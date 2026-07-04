@@ -20,8 +20,13 @@ export function listMedia(params: {
   return apiRequest<MediaListResponse>(`/api/media?${query}`);
 }
 
-export function listMediaDirectories() {
-  return apiRequest<MediaDirectory[]>('/api/media/directories');
+export function listMediaDirectories(params: { existingOnly?: boolean } = {}) {
+  const query = new URLSearchParams();
+  if (params.existingOnly) {
+    query.set('existing_only', 'true');
+  }
+  const suffix = query.toString();
+  return apiRequest<MediaDirectory[]>(`/api/media/directories${suffix ? `?${suffix}` : ''}`);
 }
 
 export function getMedia(id: string) {

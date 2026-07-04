@@ -32,6 +32,7 @@ const emptyRuntimeSettings: RuntimeSettings = {
   scan_worker_concurrency: 1,
   metadata_worker_concurrency: 6,
   vision_worker_concurrency: 1,
+  embedding_worker_concurrency: 1,
 };
 
 const emptyDirectoryRuleDefaults: DirectoryRuleDefaults = {
@@ -1005,7 +1006,7 @@ export function SettingsPage() {
             </p>
           </div>
         </div>
-        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
           <NumberField
             label="扫描目录"
             min={1}
@@ -1023,6 +1024,12 @@ export function SettingsPage() {
             min={1}
             value={runtimeForm.vision_worker_concurrency}
             onChange={(value) => setRuntimeForm({ ...runtimeForm, vision_worker_concurrency: value })}
+          />
+          <NumberField
+            label="Embedding"
+            min={1}
+            value={runtimeForm.embedding_worker_concurrency}
+            onChange={(value) => setRuntimeForm({ ...runtimeForm, embedding_worker_concurrency: value })}
           />
         </div>
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import or_, select
@@ -17,8 +18,11 @@ router = APIRouter(prefix="/directory-rules", tags=["directory-rules"])
 
 
 @router.get("", response_model=list[DirectoryRuleRead])
-def list_rules(db: Session = Depends(get_db)) -> list[DirectoryRule]:
-    return list(db.scalars(select(DirectoryRule).order_by(DirectoryRule.normalized_path)).all())
+def list_rules(existing_only: bool = False, db: Session = Depends(get_db)) -> list[DirectoryRule]:
+    rules = list(db.scalars(select(DirectoryRule).order_by(DirectoryRule.normalized_path)).all())
+    if not existing_only:
+        return rules
+    return [rule for rule in rules if _directory_exists(rule.path)]
 
 
 @router.post("", response_model=DirectoryRuleRead)
@@ -26,6 +30,13 @@ def create_rule(payload: DirectoryRuleCreate, db: Session = Depends(get_db)) -> 
     data = payload.model_dump()
     data["path"] = _display_path(data["path"])
     normalized = normalize_path(data["path"])
+    existing = db.scalar(select(DirectoryRule).where(DirectoryRule.normalized_path == normalized))
+    if existing is not None:
+        if _directory_exists(existing.path):
+            raise HTTPException(status_code=409, detail="Directory rule already exists")
+        _detach_rule_media(db, existing)
+        db.delete(existing)
+        db.flush()
     if db.scalar(select(DirectoryRule).where(DirectoryRule.normalized_path == normalized)):
         raise HTTPException(status_code=409, detail="Directory rule already exists")
     if data.get("enabled", True) and _has_disabled_ancestor_path(
@@ -82,6 +93,12 @@ def delete_rule(rule_id: uuid.UUID, db: Session = Depends(get_db)) -> None:
     rule = db.get(DirectoryRule, rule_id)
     if rule is None:
         raise HTTPException(status_code=404, detail="Directory rule not found")
+    _detach_rule_media(db, rule)
+    db.delete(rule)
+    db.commit()
+
+
+def _detach_rule_media(db: Session, rule: DirectoryRule) -> None:
     affected = db.scalars(
         select(MediaFile).where(
             or_(MediaFile.folder_rule_id == rule.id, MediaFile.root_path == rule.normalized_path)
@@ -93,8 +110,13 @@ def delete_rule(rule_id: uuid.UUID, db: Session = Depends(get_db)) -> None:
             media.resolved_config_hash = None
         if media.root_path == rule.normalized_path:
             media.root_path = None
-    db.delete(rule)
-    db.commit()
+
+
+def _directory_exists(path: str) -> bool:
+    try:
+        return Path(path).is_dir()
+    except OSError:
+        return False
 
 
 def _display_path(path: str) -> str:

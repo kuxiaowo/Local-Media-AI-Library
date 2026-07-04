@@ -20,7 +20,7 @@ export function SearchPage() {
   const [dateTo, setDateTo] = useState(submittedSearch.dateTo);
   const directoriesQuery = useQuery({
     queryKey: ['media-directories'],
-    queryFn: listMediaDirectories,
+    queryFn: () => listMediaDirectories(),
   });
   const searchResultsQuery = useQuery({
     queryKey: ['vector-search', submittedSearch],

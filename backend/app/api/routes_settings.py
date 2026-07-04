@@ -51,6 +51,7 @@ class RuntimeSettings(BaseModel):
     scan_worker_concurrency: int = Field(ge=1)
     metadata_worker_concurrency: int = Field(ge=1)
     vision_worker_concurrency: int = Field(ge=1)
+    embedding_worker_concurrency: int = Field(default=1, ge=1)
 
     @field_validator("default_embedding_model")
     @classmethod
@@ -106,6 +107,7 @@ def runtime_settings() -> RuntimeSettings:
         scan_worker_concurrency=settings.scan_worker_concurrency,
         metadata_worker_concurrency=settings.metadata_worker_concurrency,
         vision_worker_concurrency=settings.vision_worker_concurrency,
+        embedding_worker_concurrency=settings.embedding_worker_concurrency,
     )
 
 
@@ -121,6 +123,7 @@ def update_runtime_settings(payload: RuntimeSettings, request: Request) -> Runti
             "SCAN_WORKER_CONCURRENCY": str(payload.scan_worker_concurrency),
             "METADATA_WORKER_CONCURRENCY": str(payload.metadata_worker_concurrency),
             "VISION_WORKER_CONCURRENCY": str(payload.vision_worker_concurrency),
+            "EMBEDDING_WORKER_CONCURRENCY": str(payload.embedding_worker_concurrency),
         },
     )
     get_settings.cache_clear()

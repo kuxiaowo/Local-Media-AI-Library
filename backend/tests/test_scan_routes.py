@@ -227,7 +227,7 @@ def test_media_queue_hides_failed_job_superseded_by_done_media() -> None:
     assert response.items == []
 
 
-def test_media_queue_ignores_legacy_embedding_jobs() -> None:
+def test_media_queue_shows_failed_embedding_jobs() -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
     Base.metadata.create_all(engine)
     SessionLocal = sessionmaker(bind=engine, future=True)
@@ -283,8 +283,12 @@ def test_media_queue_ignores_legacy_embedding_jobs() -> None:
 
         response = get_media_queue(db=db)
 
-    assert response.total == 0
-    assert response.items == []
+    assert response.total == 1
+    assert len(response.items) == 1
+    assert response.items[0].path == "F:/Videos/embedding.mp4"
+    assert response.items[0].job_type == "generate_embedding"
+    assert response.items[0].job_status == "failed"
+    assert response.items[0].error_message == "embedding error"
 
 
 def test_media_queue_hides_stale_media_error_while_job_is_running() -> None:

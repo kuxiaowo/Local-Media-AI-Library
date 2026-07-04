@@ -26,10 +26,11 @@ MEDIA_JOB_TYPES = {
     "analyze_video",
     "reanalyze_media",
     "reanalyze_video_summary",
+    "generate_embedding",
 }
 ACTIVE_JOB_STATUSES = {"queued", "running", "failed"}
 ACTIVE_ANALYSIS_JOB_STATUSES = {"queued", "running"}
-ANALYSIS_JOB_TYPES = MEDIA_JOB_TYPES
+ANALYSIS_JOB_TYPES = {"analyze_image", "analyze_video", "reanalyze_video_summary"}
 
 
 @router.post("/start", response_model=list[JobRead])
@@ -65,7 +66,7 @@ def generate_ai_records(payload: GenerateAiRecordsRequest, db: Session = Depends
     active_analysis_media_ids = set(
         db.scalars(
             select(Job.target_id).where(
-                Job.job_type.in_(list(ANALYSIS_JOB_TYPES)),
+                Job.job_type.in_(list(MEDIA_JOB_TYPES)),
                 Job.status.in_(list(ACTIVE_ANALYSIS_JOB_STATUSES)),
                 Job.target_id.is_not(None),
             )

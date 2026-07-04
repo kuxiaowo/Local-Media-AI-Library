@@ -231,6 +231,7 @@ export interface RuntimeSettings {
   scan_worker_concurrency: number;
   metadata_worker_concurrency: number;
   vision_worker_concurrency: number;
+  embedding_worker_concurrency: number;
 }
 
 export interface AnalysisPromptSettings {

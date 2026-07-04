@@ -45,7 +45,7 @@ export function MediaBrowserPage() {
 
   const directoriesQuery = useQuery({
     queryKey: ['media-directories'],
-    queryFn: listMediaDirectories,
+    queryFn: () => listMediaDirectories(),
   });
   const directoryTree = useMemo(
     () => buildDirectoryTree(directoriesQuery.data ?? []),
