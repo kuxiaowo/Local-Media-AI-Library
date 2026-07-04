@@ -64,17 +64,22 @@ async def summarize_scope(
 
     summary = clean_text(raw.get("summary")) or _fallback_summary(candidates)
     stats = dict(raw.get("stats") or {})
-    stats.setdefault("checked_count", len(candidates))
-    stats.setdefault("image_count", sum(1 for candidate in candidates if candidate.media_type == "image"))
-    stats.setdefault("video_count", sum(1 for candidate in candidates if candidate.media_type == "video"))
+    stats["checked_count"] = len(candidates)
+    stats.setdefault("matched_count", len(candidates))
+    stats["media_count"] = len(candidates)
+    stats["image_count"] = sum(1 for candidate in candidates if candidate.media_type == "image")
+    stats["video_count"] = sum(1 for candidate in candidates if candidate.media_type == "video")
     dates = []
     for candidate in candidates:
         captured_at = comparable_datetime(candidate.captured_at)
         if captured_at is not None:
             dates.append(captured_at)
-    if dates:
-        stats.setdefault("date_min", min(dates).isoformat())
-        stats.setdefault("date_max", max(dates).isoformat())
+    date_from = comparable_datetime(scope.date_from) or (min(dates) if dates else None)
+    date_to = comparable_datetime(scope.date_to) or (max(dates) if dates else None)
+    if date_from:
+        stats["date_from"] = date_from.isoformat()
+    if date_to:
+        stats["date_to"] = date_to.isoformat()
     selected = [
         {"media_id": media_id, "score": 0.7, "reason": "总结中的代表媒体", "matched_requirements": [], "failed_requirements": [], "confidence": 0.6}
         for media_id in _representative_ids(raw, candidates)[: min(9, request.limit)]
@@ -82,7 +87,7 @@ async def summarize_scope(
     return JudgeResult(
         answer_type="summary",
         text_answer=summary,
-        selected=selected if plan.output_mode == "mixed" else [],
+        selected=selected if plan.output_mode == "mixed" and plan.should_show_media_grid else [],
         rejected=[],
         summary=summary,
         stats=stats,

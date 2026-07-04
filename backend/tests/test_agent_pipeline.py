@@ -12,7 +12,8 @@ from app.models.db_models import DirectoryRule, MediaAiSummary, MediaFile, Video
 from app.models.schemas import ChatAgentContext, ChatRuntimeContext, ChatStreamRequest, ChatUiContext
 from app.services.agent.context_builder import build_context_pack
 from app.services.agent.evidence_builder import build_evidence
-from app.services.agent.planner import fallback_plan
+from app.services.agent.planner import fallback_plan, normalize_plan
+from app.services.agent.response_composer import compose_response_blocks
 from app.services.agent.scope_resolver import resolve_scope
 from app.services.agent.types import (
     AgentContextPack,
@@ -46,6 +47,53 @@ def test_fallback_planner_identifies_core_task_types() -> None:
     assert fallback_plan(ChatStreamRequest(message="这些照片里是不是大部分是电脑桌面"), context).task_type == "question_answer"
     assert fallback_plan(ChatStreamRequest(message="刚才那些里不要太暗的"), context).task_type == "refine"
     assert fallback_plan(ChatStreamRequest(message="为什么搜不到我想要的图"), context).task_type == "explain"
+
+
+def test_planner_treats_retrospective_time_lookup_as_summary() -> None:
+    context = _context_pack()
+
+    plan = fallback_plan(ChatStreamRequest(message="查找2025年夏天发生了什么"), context)
+
+    assert plan.task_type == "summarize"
+    assert plan.output_mode == "summary"
+    assert plan.needs_media_evidence is True
+    assert plan.scope_reference == "explicit_time_range"
+    assert plan.media_type == "any"
+    assert plan.date_from == datetime(2025, 6, 1, 0, 0, 0)
+    assert plan.date_to == datetime(2025, 8, 31, 23, 59, 59)
+    assert plan.should_show_media_grid is False
+
+
+def test_normalize_plan_overrides_model_find_for_retrospective_summary() -> None:
+    context = _context_pack()
+    request = ChatStreamRequest(message="查找2025年夏天发生了什么")
+    raw = {
+        "task_type": "find",
+        "output_mode": "media_grid",
+        "needs_media_evidence": True,
+        "needs_visual_reinspection": False,
+        "should_show_media_grid": True,
+        "scope_reference": "global",
+        "media_type": "image",
+        "positive_requirements": ["2025年夏天"],
+        "negative_requirements": [],
+        "date_from": None,
+        "date_to": None,
+        "directory_hint": None,
+        "semantic_query": "查找2025年夏天发生了什么",
+        "clarification_question": None,
+        "confidence": 0.9,
+    }
+
+    plan = normalize_plan(raw, request, context)
+
+    assert plan.task_type == "summarize"
+    assert plan.output_mode == "summary"
+    assert plan.scope_reference == "explicit_time_range"
+    assert plan.media_type == "any"
+    assert plan.date_from == datetime(2025, 6, 1, 0, 0, 0)
+    assert plan.date_to == datetime(2025, 8, 31, 23, 59, 59)
+    assert plan.should_show_media_grid is False
 
 
 def test_resolve_scope_handles_ui_history_and_recent_range() -> None:
@@ -202,6 +250,42 @@ def test_summarize_agent_turn_does_not_need_vector_retrieval(monkeypatch) -> Non
     assert assistant.data["blocks"][0]["type"] == "summary"
 
 
+def test_summer_retrospective_summary_turn_does_not_use_vector_or_media_grid(monkeypatch) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
+    Base.metadata.create_all(engine)
+    SessionLocal = sessionmaker(bind=engine, future=True)
+
+    with SessionLocal() as db:
+        _seed_media(
+            db,
+            image_captured_at=datetime(2025, 7, 1),
+            video_captured_at=datetime(2025, 8, 15),
+        )
+
+        async def fail_retrieval(*_args, **_kwargs):
+            raise AssertionError("summarize should not call broad retrieval")
+
+        import app.services.conversational_search_service as service
+
+        monkeypatch.setattr(service, "retrieve_broad_candidates", fail_retrieval)
+        request = ChatStreamRequest(
+            message="查找2025年夏天发生了什么",
+            context=ChatAgentContext(runtime_context=ChatRuntimeContext(today="2026-06-28")),
+        )
+        events = asyncio.run(_collect_events(db, request))
+
+    plan_event = [event for event in events if event.event == "plan"][-1]
+    assert plan_event.data["plan"]["task_type"] == "summarize"
+    assert plan_event.data["plan"]["output_mode"] == "summary"
+    assert plan_event.data["plan"]["should_show_media_grid"] is False
+    assert not any(event.event == "retrieval_progress" for event in events)
+
+    assistant = [event for event in events if event.event == "assistant_message"][-1]
+    block_types = [block["type"] for block in assistant.data["blocks"]]
+    assert "summary" in block_types
+    assert "media_grid" not in block_types
+
+
 def test_question_answer_turn_does_not_force_media_grid() -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
     Base.metadata.create_all(engine)
@@ -236,6 +320,32 @@ def test_context_pack_falls_back_when_frontend_sends_no_context() -> None:
     assert context.runtime_context.timezone == "Asia/Shanghai"
     assert context.ui_context.page == "agent"
     assert context.library_context.roots
+
+
+def test_response_blocks_filter_debug_stats_fields() -> None:
+    blocks = compose_response_blocks(
+        request=ChatStreamRequest(message="总结一下"),
+        plan=AgentPlan(task_type="summarize", output_mode="summary", should_show_media_grid=False),
+        scope=Scope(),
+        judge_result=JudgeResult(
+            summary="这是自然语言总结。",
+            stats={
+                "checked_count": 3,
+                "matched_count": 3,
+                "model_revision": "debug-model",
+                "reasoning_count": 9,
+                "vision_encodings_per_sec": 12.5,
+            },
+        ),
+        candidates=[],
+    )
+
+    visible = str(blocks)
+    assert "model_revision" not in visible
+    assert "reasoning_count" not in visible
+    assert "vision_encodings_per_sec" not in visible
+    stats_blocks = [block for block in blocks if block["type"] == "stats"]
+    assert stats_blocks == [{"type": "stats", "stats": {"checked_count": 3, "matched_count": 3}}]
 
 
 async def _collect_events(db, request: ChatStreamRequest):
@@ -274,7 +384,12 @@ def _context_pack(
     )
 
 
-def _seed_media(db):
+def _seed_media(
+    db,
+    *,
+    image_captured_at: datetime = datetime(2026, 6, 1),
+    video_captured_at: datetime = datetime(2026, 6, 2),
+):
     rule = DirectoryRule(
         path="F:/Photos",
         normalized_path="f:/photos",
@@ -298,7 +413,7 @@ def _seed_media(db):
         media_type="image",
         width=1200,
         height=800,
-        captured_at=datetime(2026, 6, 1),
+        captured_at=image_captured_at,
         status="done",
         folder_rule=rule,
     )
@@ -309,7 +424,7 @@ def _seed_media(db):
         parent_dir="f:/photos/current",
         media_type="video",
         duration_seconds=10,
-        captured_at=datetime(2026, 6, 2),
+        captured_at=video_captured_at,
         status="done",
         folder_rule=rule,
     )

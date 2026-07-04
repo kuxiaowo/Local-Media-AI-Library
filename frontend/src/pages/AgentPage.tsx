@@ -26,6 +26,16 @@ type ChatMessage = Omit<SearchMessage, 'blocks'> & {
 };
 
 const searchMediaTypeValues = new Set(['any', 'image', 'video']);
+const publicStatsKeys = new Set([
+  'checked_count',
+  'matched_count',
+  'media_count',
+  'image_count',
+  'video_count',
+  'date_from',
+  'date_to',
+  'confidence',
+]);
 
 export function AgentPage() {
   const location = useLocation();
@@ -567,7 +577,9 @@ function ClarificationBlock({ block }: { block: ClarificationAssistantBlock }) {
 }
 
 function StatsBlock({ block }: { block: StatsAssistantBlock }) {
-  const entries = Object.entries(block.stats ?? {}).filter(([, value]) => value !== null && value !== undefined && value !== '');
+  const entries = Object.entries(block.stats ?? {}).filter(
+    ([key, value]) => publicStatsKeys.has(key) && value !== null && value !== undefined && value !== '',
+  );
   if (entries.length === 0) {
     return null;
   }
@@ -832,10 +844,11 @@ function formatStatLabel(value: string) {
   const labels: Record<string, string> = {
     checked_count: '检查数量',
     matched_count: '匹配数量',
+    media_count: '媒体数量',
     image_count: '图片',
     video_count: '视频',
-    date_min: '最早时间',
-    date_max: '最晚时间',
+    date_from: '开始时间',
+    date_to: '结束时间',
     confidence: '置信度',
   };
   return labels[value] ?? value;

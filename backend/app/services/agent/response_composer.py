@@ -10,6 +10,16 @@ from app.services.agent.utils import clean_text, clamp_score
 
 
 _MAX_DISPLAY_MEDIA = 30
+_PUBLIC_STATS_KEYS = (
+    "checked_count",
+    "matched_count",
+    "media_count",
+    "image_count",
+    "video_count",
+    "date_from",
+    "date_to",
+    "confidence",
+)
 
 
 def compose_response_blocks(
@@ -28,12 +38,14 @@ def compose_response_blocks(
     if plan.output_mode == "summary":
         text = judge_result.summary or judge_result.text_answer or "没有可总结的内容。"
         blocks.append({"type": "summary", "title": "范围总结", "text": text})
-        if judge_result.stats:
-            blocks.append({"type": "stats", "stats": judge_result.stats})
+        public_stats = _public_stats(judge_result.stats)
+        if public_stats:
+            blocks.append({"type": "stats", "stats": public_stats})
         return blocks
 
     if plan.output_mode in {"question_answer", "text_answer"}:
         answer = judge_result.text_answer or judge_result.summary or "没有足够证据回答。"
+        public_stats = _public_stats(judge_result.stats)
         if plan.output_mode == "question_answer":
             blocks.append(
                 {
@@ -41,13 +53,13 @@ def compose_response_blocks(
                     "question": request.message,
                     "answer": answer,
                     "confidence": judge_result.confidence,
-                    "basis": judge_result.stats,
+                    "basis": public_stats,
                 }
             )
         else:
             blocks.append({"type": "text", "text": answer})
-        if judge_result.stats:
-            blocks.append({"type": "stats", "stats": judge_result.stats})
+        if public_stats:
+            blocks.append({"type": "stats", "stats": public_stats})
         return blocks
 
     if judge_result.text_answer:
@@ -58,11 +70,12 @@ def compose_response_blocks(
         candidates,
         limit=min(request.limit, _MAX_DISPLAY_MEDIA),
     )
-    if media_items and plan.output_mode in {"media_grid", "mixed"}:
+    if media_items and plan.output_mode in {"media_grid", "mixed"} and plan.should_show_media_grid:
         blocks.append({"type": "media_grid", "title": _media_title(plan), "items": media_items})
 
-    if judge_result.stats and plan.output_mode == "mixed":
-        blocks.append({"type": "stats", "stats": judge_result.stats})
+    public_stats = _public_stats(judge_result.stats)
+    if public_stats and plan.output_mode == "mixed":
+        blocks.append({"type": "stats", "stats": public_stats})
 
     if not blocks:
         blocks.append({"type": "text", "text": judge_result.text_answer or "没有找到符合条件的媒体。"})
@@ -98,6 +111,11 @@ def _validated_blocks(
             block = {key: value for key, value in raw_block.items() if key != "items"}
             if block_type == "text" and not clean_text(block.get("text")):
                 continue
+            if block_type == "stats":
+                stats = _public_stats(block.get("stats") if isinstance(block.get("stats"), dict) else {})
+                if not stats:
+                    continue
+                block["stats"] = stats
             blocks.append(block)
         elif block_type == "media_grid":
             items: list[dict[str, Any]] = []
@@ -203,4 +221,16 @@ def _media_title(plan: AgentPlan) -> str:
     if plan.task_type == "refine":
         return "继续筛选结果"
     return "匹配媒体"
+
+
+def _public_stats(stats: dict[str, Any] | object) -> dict[str, Any]:
+    if not isinstance(stats, dict):
+        return {}
+    result: dict[str, Any] = {}
+    for key in _PUBLIC_STATS_KEYS:
+        value = stats.get(key)
+        if value is None or value == "":
+            continue
+        result[key] = value
+    return result
 

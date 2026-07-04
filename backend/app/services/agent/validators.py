@@ -22,7 +22,7 @@ def validate_judge_result(
     allowed_ids = set(evidence_by_id) or set(candidate_by_id)
     selected: list[dict[str, Any]] = []
     seen: set[str] = set()
-    allow_media_output = plan.output_mode in {"media_grid", "mixed"}
+    allow_media_output = plan.output_mode in {"media_grid", "mixed"} and plan.should_show_media_grid
 
     for item in result.selected:
         media_id = clean_text(item.get("media_id"))

@@ -119,6 +119,7 @@ class AgentPlan:
     output_mode: str = "media_grid"
     needs_media_evidence: bool = True
     needs_visual_reinspection: bool = False
+    should_show_media_grid: bool = True
     scope_reference: str = "global"
     media_type: str = "any"
     positive_requirements: list[str] = field(default_factory=list)
@@ -136,6 +137,7 @@ class AgentPlan:
             "output_mode": self.output_mode,
             "needs_media_evidence": self.needs_media_evidence,
             "needs_visual_reinspection": self.needs_visual_reinspection,
+            "should_show_media_grid": self.should_show_media_grid,
             "scope_reference": self.scope_reference,
             "media_type": self.media_type,
             "positive_requirements": self.positive_requirements,

@@ -30,6 +30,7 @@ PLAN_SCHEMA: dict[str, Any] = {
         "output_mode": {"type": "string", "enum": sorted(OUTPUT_MODES)},
         "needs_media_evidence": {"type": "boolean"},
         "needs_visual_reinspection": {"type": "boolean"},
+        "should_show_media_grid": {"type": "boolean"},
         "scope_reference": {"type": "string", "enum": sorted(SCOPE_REFERENCES)},
         "media_type": {"type": "string", "enum": ["image", "video", "any"]},
         "positive_requirements": {"type": "array", "items": {"type": "string"}},
@@ -46,6 +47,7 @@ PLAN_SCHEMA: dict[str, Any] = {
         "output_mode",
         "needs_media_evidence",
         "needs_visual_reinspection",
+        "should_show_media_grid",
         "scope_reference",
         "media_type",
         "positive_requirements",
@@ -68,9 +70,14 @@ PLANNER_SYSTEM_PROMPT = """你是本地媒体库 Agent 的 Request Planner。
 - “刚才那些/上面那些”优先指 conversation_context.last_shown_media_ids。
 - “最近”默认指 runtime_context.today 往前 recent_default_days 天。
 - “今天/昨天/上周/今年”必须根据 runtime_context.timezone 和 today 解释。
+- 不要只根据“查找/找/看看”判断为 find；这些词也可能是用户在问某个范围内发生了什么。
+- 如果用户表达“发生了什么”“那段时间有什么”“这段时间拍了什么”“回顾一下”“总结一下”“主要内容”，优先判定为 summarize 或 question_answer。
+- “YYYY年夏天/夏季”按 6 月 1 日 00:00:00 到 8 月 31 日 23:59:59 解释。
 - 总结类请求 output_mode 应为 summary。
 - 找图、推荐、筛选类请求通常 output_mode 为 media_grid 或 mixed。
 - 问答类请求通常 output_mode 为 question_answer 或 text_answer。
+- output_mode=summary 时 should_show_media_grid 默认为 false；只有用户明确要求“显示照片/给我看代表图/列出媒体”等，才设为 true。
+- 例：“查找2025年夏天发生了什么”应输出 task_type=summarize, output_mode=summary, needs_media_evidence=true, scope_reference=explicit_time_range, media_type=any, date_from=2025-06-01T00:00:00, date_to=2025-08-31T23:59:59, should_show_media_grid=false。
 - 系统能力解释、为什么搜不到、用法说明通常 needs_media_evidence=false。
 - 信息不足且无法从上下文推断时 output_mode=clarification，并给 clarification_question。
 只返回符合 schema 的 JSON。"""
@@ -104,6 +111,7 @@ Context Pack：
 
 def normalize_plan(raw: dict[str, Any], request: ChatStreamRequest, context_pack: AgentContextPack) -> AgentPlan:
     fallback = fallback_plan(request, context_pack)
+    message = request.message.strip()
     task_type = clean_text(raw.get("task_type")) or fallback.task_type
     if task_type not in TASK_TYPES:
         task_type = fallback.task_type
@@ -116,17 +124,46 @@ def normalize_plan(raw: dict[str, Any], request: ChatStreamRequest, context_pack
     media_type = clean_text(raw.get("media_type")) or fallback.media_type
     if media_type not in {"image", "video", "any"}:
         media_type = fallback.media_type
+    needs_media_evidence = _bool_value(raw.get("needs_media_evidence"), fallback.needs_media_evidence)
+    needs_visual_reinspection = _bool_value(
+        raw.get("needs_visual_reinspection"), fallback.needs_visual_reinspection
+    )
+    should_show_media_grid = _bool_value(raw.get("should_show_media_grid"), fallback.should_show_media_grid)
+    date_from = parse_datetime(raw.get("date_from"), end_of_day=False) or fallback.date_from
+    date_to = parse_datetime(raw.get("date_to"), end_of_day=True) or fallback.date_to
+
+    inferred_date_from, inferred_date_to = _infer_dates(message, context_pack)
+    if inferred_date_from or inferred_date_to:
+        date_from = inferred_date_from
+        date_to = inferred_date_to
+
+    if _is_retrospective_summary_request(message):
+        task_type = "summarize"
+        output_mode = "summary"
+        needs_media_evidence = True
+        needs_visual_reinspection = False
+        should_show_media_grid = _wants_media_grid(message)
+        if inferred_date_from or inferred_date_to:
+            scope_reference = "explicit_time_range" if scope_reference == "global" else scope_reference
+        media_type = "any" if request.media_type == "any" else media_type
+
+    if output_mode == "summary" and not _wants_media_grid(message):
+        should_show_media_grid = False
+    if output_mode in {"media_grid", "mixed"} and task_type in {"find", "recommend", "filter", "refine"}:
+        should_show_media_grid = True
+
     return AgentPlan(
         task_type=task_type,
         output_mode=output_mode,
-        needs_media_evidence=bool(raw.get("needs_media_evidence", fallback.needs_media_evidence)),
-        needs_visual_reinspection=bool(raw.get("needs_visual_reinspection", fallback.needs_visual_reinspection)),
+        needs_media_evidence=needs_media_evidence,
+        needs_visual_reinspection=needs_visual_reinspection,
+        should_show_media_grid=should_show_media_grid,
         scope_reference=scope_reference,
         media_type=media_type,
         positive_requirements=_string_list(raw.get("positive_requirements")) or fallback.positive_requirements,
         negative_requirements=_string_list(raw.get("negative_requirements")) or fallback.negative_requirements,
-        date_from=parse_datetime(raw.get("date_from"), end_of_day=False) or fallback.date_from,
-        date_to=parse_datetime(raw.get("date_to"), end_of_day=True) or fallback.date_to,
+        date_from=date_from,
+        date_to=date_to,
         directory_hint=clean_text(raw.get("directory_hint")) or fallback.directory_hint,
         semantic_query=clean_text(raw.get("semantic_query")) or fallback.semantic_query,
         clarification_question=clean_text(raw.get("clarification_question")) or fallback.clarification_question,
@@ -141,32 +178,39 @@ def fallback_plan(request: ChatStreamRequest, context_pack: AgentContextPack) ->
     task_type = "find"
     output_mode = "media_grid"
     needs_media_evidence = True
+    should_show_media_grid = True
     confidence = 0.55
 
     if _matches(message, r"为什么.*搜不到|搜不到.*为什么|怎么搜|如何搜|系统.*能力|能不能|怎么用|解释"):
         task_type = "explain"
         output_mode = "text_answer"
         needs_media_evidence = False
+        should_show_media_grid = False
         confidence = 0.75
-    elif _matches(message, r"总结|概括|汇总|主要.*内容|这个文件夹.*什么|文件夹.*内容"):
+    elif _is_retrospective_summary_request(message):
         task_type = "summarize"
         output_mode = "summary"
+        should_show_media_grid = _wants_media_grid(message)
         confidence = 0.75
     elif _matches(message, r"刚才|上面|那些|继续|筛掉|排除|不要|去掉|更暗|太暗|太亮"):
         task_type = "refine"
         output_mode = "media_grid"
+        should_show_media_grid = True
         confidence = 0.7
     elif _matches(message, r"有没有|是否|是不是|大部分|多少|几.*个|为什么|吗[？?]?$"):
         task_type = "question_answer"
         output_mode = "question_answer"
+        should_show_media_grid = _wants_media_grid(message)
         confidence = 0.72
     elif _matches(message, r"推荐|适合|哪张|哪一张|最好|封面|背景图|构图|清晰|模糊|闭眼"):
         task_type = "recommend"
         output_mode = "mixed"
+        should_show_media_grid = True
         confidence = 0.72
     elif _matches(message, r"筛选|过滤|只要|找出|找几张|找.*照片|找.*图片|找.*视频"):
         task_type = "find"
         output_mode = "media_grid"
+        should_show_media_grid = True
         confidence = 0.68
 
     scope_reference = _infer_scope_reference(message, context_pack)
@@ -187,6 +231,7 @@ def fallback_plan(request: ChatStreamRequest, context_pack: AgentContextPack) ->
         output_mode=output_mode,
         needs_media_evidence=needs_media_evidence,
         needs_visual_reinspection=needs_visual_reinspection,
+        should_show_media_grid=should_show_media_grid,
         scope_reference=scope_reference,
         media_type=media_type,
         positive_requirements=positive_requirements,
@@ -228,6 +273,10 @@ def _infer_scope_reference(message: str, context_pack: AgentContextPack) -> str:
 
 def _infer_dates(message: str, context_pack: AgentContextPack) -> tuple[datetime | None, datetime | None]:
     runtime = context_pack.runtime_context
+    season = re.search(r"(?P<year>(?:19|20)\d{2})\s*年?\s*(?:夏天|夏季)", message)
+    if season:
+        year = int(season.group("year"))
+        return datetime(year, 6, 1), datetime(year, 8, 31, 23, 59, 59)
     if "最近" in message:
         return recent_range(runtime.today, runtime.recent_default_days)
     try:
@@ -247,6 +296,20 @@ def _infer_dates(message: str, context_pack: AgentContextPack) -> tuple[datetime
     if "今年" in message:
         return datetime(today_date.year, 1, 1), datetime(today_date.year, 12, 31, 23, 59, 59, 999999)
     return None, None
+
+
+def _is_retrospective_summary_request(message: str) -> bool:
+    return _matches(
+        message,
+        r"发生了什么|那段时间有什么|这段时间.*有什么|这段时间.*拍了什么|拍了什么|回顾一下|总结一下|总结|概括|汇总|主要.*内容|这个文件夹.*什么|文件夹.*内容",
+    )
+
+
+def _wants_media_grid(message: str) -> bool:
+    return _matches(
+        message,
+        r"显示.*(照片|图片|视频|媒体)|展示.*(照片|图片|视频|媒体)|给我看|看.*(照片|图片|视频|代表图)|代表图|代表照片|列出.*(媒体|照片|图片|视频)|列一下.*(媒体|照片|图片|视频)|媒体列表|媒体卡片|找几张|找.*照片|找.*图片|找.*视频|找出|筛选|推荐|哪张|哪一张",
+    )
 
 
 def _positive_requirements(message: str, task_type: str) -> list[str]:
@@ -285,6 +348,17 @@ def _string_list(value: object) -> list[str]:
     if not isinstance(value, list):
         return []
     return _dedupe(clean_text(item) for item in value)
+
+
+def _bool_value(value: object, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = clean_text(value).lower()
+    if text in {"true", "1", "yes"}:
+        return True
+    if text in {"false", "0", "no"}:
+        return False
+    return default
 
 
 def _dedupe(values) -> list[str]:
