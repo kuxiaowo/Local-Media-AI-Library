@@ -4,6 +4,7 @@ import asyncio
 import re
 import uuid
 from datetime import datetime
+from types import SimpleNamespace
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -13,6 +14,7 @@ from app.models.db_models import DirectoryRule, MediaAiSummary, MediaFile, Video
 from app.models.schemas import ChatAgentContext, ChatRuntimeContext, ChatStreamRequest, ChatUiContext
 from app.services.agent.context_builder import build_context_pack
 from app.services.agent.evidence_builder import build_evidence
+from app.services.agent import media_library_agent
 from app.services.agent.media_library_agent import _list_media_descriptions
 from app.services.agent.planner import fallback_plan, normalize_plan
 from app.services.agent.response_composer import compose_response_blocks
@@ -107,6 +109,59 @@ class LoopingOllama:
 
     async def embed_text(self, **_kwargs):
         raise AssertionError("max-turn fallback should not run vector embedding")
+
+
+class DirectoryInfoThenAnswerOllama:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def generate_text_json(self, **kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            return {
+                "response_mode": "use_tool",
+                "visible_response": {
+                    "text": "",
+                    "answer_type": "summary",
+                    "confidence": "medium",
+                    "checked_scope_summary": "",
+                    "limitations": "",
+                },
+                "tool_request": {
+                    "name": "list_directory_info",
+                    "reason_summary": "先读取当前资源目录的统计信息。",
+                    "arguments": {"directory_path": "F:/Photos/Current", "page": 1, "page_size": 40},
+                },
+                "media": {"selected_media_ids": []},
+                "visible_memory_update": {
+                    "known_facts": [],
+                    "checked_scopes": ["f:/photos/current 目录统计"],
+                    "candidate_media_ids": [],
+                    "rejected_scopes": [],
+                },
+            }
+        prompt = kwargs.get("prompt") or ""
+        assert '"directory_stats"' in prompt
+        return {
+            "response_mode": "answer",
+            "visible_response": {
+                "text": "当前资源目录下有 f:/photos/current，包含 2 个已分析媒体：1 张图片和 1 个视频。",
+                "answer_type": "summary",
+                "confidence": "high",
+                "checked_scope_summary": "读取了 f:/photos/current 的目录统计。",
+                "limitations": "目录结构来自数据库中已有 AI 摘要的媒体目录，不代表未扫描的空文件夹。",
+            },
+            "media": {"selected_media_ids": []},
+            "visible_memory_update": {
+                "known_facts": ["f:/photos/current 有 2 个已分析媒体"],
+                "checked_scopes": ["f:/photos/current 目录统计"],
+                "candidate_media_ids": [],
+                "rejected_scopes": [],
+            },
+        }
+
+    async def embed_text(self, **_kwargs):
+        raise RuntimeError("directory answer should not run embedding")
 
 
 def test_fallback_planner_identifies_core_task_types() -> None:
@@ -364,6 +419,29 @@ def test_media_library_agent_reads_page_then_answers_with_final_json() -> None:
     assert "media_grid" in block_types
 
 
+def test_media_library_agent_directory_answer_uses_visible_response_without_media_cards() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
+    Base.metadata.create_all(engine)
+    SessionLocal = sessionmaker(bind=engine, future=True)
+
+    with SessionLocal() as db:
+        _seed_media(db)
+        request = ChatStreamRequest(message="只需要把当前目录结构输出给我", directory_path="F:/Photos/Current")
+        events = asyncio.run(_collect_events(db, request, DirectoryInfoThenAnswerOllama()))
+
+    action_events = [event for event in events if event.event == "agent_action"]
+    assert [event.data["action"] for event in action_events] == ["list_directory_info", "answer_now"]
+    assert action_events[-1].data["visible_response"]["text"].startswith("当前资源目录下有")
+    assert any(event.event == "tool_result" and event.data["tool"] == "list_directory_info" for event in events)
+    final = [event for event in events if event.event == "final_answer"][-1].data["final_answer"]
+    assert final["answer_type"] == "summary"
+    assert "f:/photos/current" in final["answer"]
+    assert "selected_media_ids" not in final
+    assistant = [event for event in events if event.event == "assistant_message"][-1]
+    block_types = [block["type"] for block in assistant.data["blocks"]]
+    assert "media_grid" not in block_types
+
+
 def test_media_library_agent_max_turns_does_not_vector_fallback_outside_date_range() -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
     Base.metadata.create_all(engine)
@@ -385,6 +463,33 @@ def test_media_library_agent_max_turns_does_not_vector_fallback_outside_date_ran
     assistant = [event for event in events if event.event == "assistant_message"][-1]
     block_types = [block["type"] for block in assistant.data["blocks"]]
     assert "media_grid" not in block_types
+
+
+def test_media_library_agent_uses_configured_max_turns(monkeypatch) -> None:
+    monkeypatch.setattr(
+        media_library_agent,
+        "get_settings",
+        lambda: SimpleNamespace(
+            default_ai_search_model="agent-model",
+            default_summary_model="summary-model",
+            default_embedding_model="",
+            ai_search_max_turns=2,
+        ),
+    )
+    engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
+    Base.metadata.create_all(engine)
+    SessionLocal = sessionmaker(bind=engine, future=True)
+
+    with SessionLocal() as db:
+        _seed_media(db, image_captured_at=datetime(2026, 1, 1), video_captured_at=datetime(2026, 1, 2))
+        events = asyncio.run(_collect_events(db, ChatStreamRequest(message="2025年夏天发生了什么"), LoopingOllama()))
+
+    search_actions = [
+        event for event in events if event.event == "agent_action" and event.data["action"] == "search_descriptions"
+    ]
+    assert len(search_actions) == 2
+    final_tool = [event for event in events if event.event == "tool_result"][-1]
+    assert final_tool.data["tool"] == "fallback_no_media_selection"
 
 
 def test_media_library_agent_fallback_on_invalid_json_uses_keyword_search() -> None:

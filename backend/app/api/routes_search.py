@@ -81,9 +81,12 @@ async def stream_search_chat(payload: ChatStreamRequest) -> StreamingResponse:
 async def _chat_event_stream(payload: ChatStreamRequest):
     tool_events: list[dict[str, Any]] = []
     assistant_saved = False
-    with SessionLocal() as db:
-        try:
+    conversation_id: uuid.UUID | None = None
+
+    try:
+        with SessionLocal() as db:
             conversation = _get_or_create_conversation(db, payload)
+            conversation_id = conversation.id
             user_message = SearchMessage(
                 conversation_id=conversation.id,
                 role="user",
@@ -99,9 +102,6 @@ async def _chat_event_stream(payload: ChatStreamRequest):
             db.commit()
             db.refresh(user_message)
 
-            yield _sse("conversation", {"conversation_id": str(conversation.id)})
-            yield _sse("user_message", {"message": _message_payload(user_message)})
-
             history = list(
                 db.scalars(
                     select(SearchMessage)
@@ -109,7 +109,14 @@ async def _chat_event_stream(payload: ChatStreamRequest):
                     .order_by(SearchMessage.created_at)
                 ).all()
             )
-            async for event in run_agent_turn_events(db, payload, history, OllamaClient()):
+            conversation_payload = {"conversation_id": str(conversation.id)}
+            user_payload = {"message": _message_payload(user_message)}
+
+        yield _sse("conversation", conversation_payload)
+        yield _sse("user_message", user_payload)
+
+        with SessionLocal() as agent_db:
+            async for event in run_agent_turn_events(agent_db, payload, history, OllamaClient()):
                 if event.event in {
                     "agent_action",
                     "final_answer",
@@ -125,41 +132,46 @@ async def _chat_event_stream(payload: ChatStreamRequest):
                     tool_events.append({"event": event.event, **event.data})
 
                 if event.event == "assistant_message":
-                    assistant = SearchMessage(
-                        conversation_id=conversation.id,
-                        role="assistant",
-                        content=str(event.data.get("content") or ""),
-                        blocks=event.data.get("blocks") or [],
-                        tool_events=tool_events,
-                    )
-                    conversation.last_message_at = datetime.now(timezone.utc)
-                    db.add_all([conversation, assistant])
-                    db.commit()
-                    db.refresh(assistant)
+                    with SessionLocal() as db:
+                        conversation = db.get(SearchConversation, conversation_id)
+                        if conversation is None:
+                            raise RuntimeError("Conversation not found")
+                        assistant = SearchMessage(
+                            conversation_id=conversation.id,
+                            role="assistant",
+                            content=str(event.data.get("content") or ""),
+                            blocks=event.data.get("blocks") or [],
+                            tool_events=tool_events,
+                        )
+                        conversation.last_message_at = datetime.now(timezone.utc)
+                        db.add_all([conversation, assistant])
+                        db.commit()
+                        db.refresh(assistant)
+                        done_payload = {"message": _message_payload(assistant)}
                     assistant_saved = True
-                    yield _sse("done", {"message": _message_payload(assistant)})
+                    yield _sse("done", done_payload)
                     continue
 
                 yield _sse(event.event, event.data)
-        except Exception as exc:
-            db.rollback()
-            if not assistant_saved:
-                try:
-                    conversation = _get_or_create_conversation(db, payload)
+    except Exception as exc:
+        if not assistant_saved:
+            try:
+                with SessionLocal() as db:
+                    conversation = _error_conversation(db, payload, conversation_id)
                     assistant = SearchMessage(
                         conversation_id=conversation.id,
                         role="assistant",
-                        content=f"检索失败：{exc}",
-                        blocks=[{"type": "text", "text": f"检索失败：{exc}"}],
+                        content=f"搜索失败：{exc}",
+                        blocks=[{"type": "text", "text": f"搜索失败：{exc}"}],
                         tool_events=tool_events,
                         error_message=str(exc),
                     )
                     conversation.last_message_at = datetime.now(timezone.utc)
                     db.add_all([conversation, assistant])
                     db.commit()
-                except Exception:
-                    db.rollback()
-            yield _sse("error", {"message": str(exc)})
+            except Exception:
+                pass
+        yield _sse("error", {"message": str(exc)})
 
 
 def _get_or_create_conversation(db: Session, payload: ChatStreamRequest) -> SearchConversation:
@@ -172,6 +184,18 @@ def _get_or_create_conversation(db: Session, payload: ChatStreamRequest) -> Sear
     db.add(conversation)
     db.flush()
     return conversation
+
+
+def _error_conversation(
+    db: Session,
+    payload: ChatStreamRequest,
+    conversation_id: uuid.UUID | None,
+) -> SearchConversation:
+    if conversation_id is not None:
+        conversation = db.get(SearchConversation, conversation_id)
+        if conversation is not None:
+            return conversation
+    return _get_or_create_conversation(db, payload)
 
 
 def _conversation_title(message: str) -> str:

@@ -46,6 +46,7 @@ router = APIRouter(prefix="/settings", tags=["settings"])
 class RuntimeSettings(BaseModel):
     default_embedding_model: str = Field(min_length=1)
     default_ai_search_model: str = Field(min_length=1)
+    ai_search_max_turns: int = Field(ge=1, le=30)
     max_image_long_edge: int = Field(ge=256, le=4096)
     scan_worker_concurrency: int = Field(ge=1)
     metadata_worker_concurrency: int = Field(ge=1)
@@ -87,6 +88,7 @@ def defaults() -> dict[str, object]:
         "default_vision_model": settings.default_vision_model,
         "default_summary_model": settings.default_summary_model,
         "default_ai_search_model": settings.default_ai_search_model,
+        "ai_search_max_turns": settings.ai_search_max_turns,
         "default_embedding_model": settings.default_embedding_model,
         "default_embedding_dimensions": settings.default_embedding_dimensions,
         "max_image_long_edge": settings.max_image_long_edge,
@@ -99,6 +101,7 @@ def runtime_settings() -> RuntimeSettings:
     return RuntimeSettings(
         default_embedding_model=settings.default_embedding_model,
         default_ai_search_model=settings.default_ai_search_model,
+        ai_search_max_turns=settings.ai_search_max_turns,
         max_image_long_edge=settings.max_image_long_edge,
         scan_worker_concurrency=settings.scan_worker_concurrency,
         metadata_worker_concurrency=settings.metadata_worker_concurrency,
@@ -113,6 +116,7 @@ def update_runtime_settings(payload: RuntimeSettings, request: Request) -> Runti
         {
             "DEFAULT_EMBEDDING_MODEL": payload.default_embedding_model.strip(),
             "DEFAULT_AI_SEARCH_MODEL": payload.default_ai_search_model.strip(),
+            "AI_SEARCH_MAX_TURNS": str(payload.ai_search_max_turns),
             "MAX_IMAGE_LONG_EDGE": str(payload.max_image_long_edge),
             "SCAN_WORKER_CONCURRENCY": str(payload.scan_worker_concurrency),
             "METADATA_WORKER_CONCURRENCY": str(payload.metadata_worker_concurrency),

@@ -11,6 +11,7 @@ from sqlalchemy import func, literal, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
+from app.core.path_utils import normalize_path
 from app.models.db_models import EmbeddingProfile, MediaAiSummary, MediaEmbedding, MediaFile, SearchMessage
 from app.models.schemas import ChatStreamRequest
 from app.services.agent.context_builder import build_context_pack
@@ -41,11 +42,12 @@ ACTION_NAMES = {
     "search_descriptions",
     "select_media",
 }
+TOOL_ACTION_NAMES = ACTION_NAMES - {"answer_now"}
 ANSWER_TYPES = {"answer", "summary", "media_selection"}
 CONFIDENCE_VALUES = {"high", "medium", "low"}
+RESPONSE_MODES = {"answer", "use_tool"}
 DEFAULT_PAGE_SIZE = 40
 MAX_PAGE_SIZE = 50
-MAX_AGENT_TURNS = 8
 MAX_READ_PAGES_IN_CONTEXT = 8
 MAX_CANDIDATES_IN_CONTEXT = 160
 MAX_TOOL_EVENT_ITEMS = 20
@@ -54,9 +56,34 @@ MAX_TOOL_EVENT_ITEMS = 20
 MEDIA_LIBRARY_ACTION_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "action": {"type": "string", "enum": sorted(ACTION_NAMES)},
-        "reason_summary": {"type": "string"},
-        "arguments": {"type": "object"},
+        "response_mode": {"type": "string", "enum": sorted(RESPONSE_MODES)},
+        "visible_response": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string"},
+                "answer_type": {"type": "string", "enum": sorted(ANSWER_TYPES)},
+                "confidence": {"type": "string", "enum": sorted(CONFIDENCE_VALUES)},
+                "checked_scope_summary": {"type": "string"},
+                "limitations": {"type": "string"},
+            },
+            "required": ["text", "answer_type", "confidence", "checked_scope_summary", "limitations"],
+        },
+        "tool_request": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "enum": sorted(TOOL_ACTION_NAMES)},
+                "reason_summary": {"type": "string"},
+                "arguments": {"type": "object"},
+            },
+            "required": ["name", "reason_summary", "arguments"],
+        },
+        "media": {
+            "type": "object",
+            "properties": {
+                "selected_media_ids": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["selected_media_ids"],
+        },
         "visible_memory_update": {
             "type": "object",
             "properties": {
@@ -68,34 +95,69 @@ MEDIA_LIBRARY_ACTION_SCHEMA: dict[str, Any] = {
             "required": ["known_facts", "checked_scopes", "candidate_media_ids", "rejected_scopes"],
         },
     },
-    "required": ["action", "reason_summary", "arguments", "visible_memory_update"],
+    "required": ["response_mode", "visible_response", "media", "visible_memory_update"],
 }
 
 
 MEDIA_LIBRARY_AGENT_SYSTEM_PROMPT = """你是本地媒体库 MediaLibraryAgent。
 你只能基于 Context Pack 和工具返回的已有文本信息回答：媒体摘要、目录信息、时间信息、背景信息、视频分段文字。
 你不能要求重新读取原图、视频、音频或缩略图，也不能假设自己看过原始媒体。
-每轮只返回一个 JSON action，不要输出 Markdown，不要输出长篇 chain-of-thought。
+每轮只返回一个 JSON，不要输出 Markdown，不要输出长篇 chain-of-thought。
 reason_summary 只写一句可见的简短理由。
+visible_response.text 是给用户看的自然语言回答槽位；当 response_mode 是 answer 时必须写清楚回答、原因、范围或限制。
 
-可用 action：
+决策原则：
+1. 先判断用户真正要什么，再判断当前 Context Pack 是否已经足够回答；足够时 response_mode 必须是 answer。
+2. 工具不是默认步骤。只有存在明确的信息缺口，并且该工具能补齐这个缺口时，才调用工具。
+3. 如果 response_mode 是 use_tool，每轮选择成本最低、范围最窄、最能补齐缺口的 tool_request；不要为了“更完整”而搜索、分页或扩大范围。
+4. 如果用户明确要求“直接回答/直接输出/自然语言输出/不要搜索/不要使用某工具”，必须尊重这个约束；response_mode 应为 answer，且不要输出 tool_request。
+5. 概览、目录、统计、时间跨度、背景分布等结构化问题，优先使用 Context Pack、list_directories 或 list_directory_info。
+6. 具体事件、画面内容、文本细节、人物动作等需要从大量媒体摘要中召回时，才使用 search_descriptions 或 list_media_descriptions。
+7. 用户没有要求找具体照片/视频时，不要为了回答而生成媒体候选或媒体卡片。
+8. Agent 最多 {{max_agent_turns}} 轮；不要重复调用不能带来新信息的工具，信息不足时应使用 response_mode=answer 并说明检查范围和限制。
+
+选择 response_mode 前先完成这个可见决策检查，但不要输出长篇推理：
+- 用户是否禁止了某个工具或要求直接自然语言回答？如果是，遵守它。
+- 当前 Context Pack 的哪些字段已经能回答问题？
+- 还缺什么信息？缺口是否必须通过工具补齐？
+- 如果没有必要的新信息缺口，response_mode 必须是 answer。
+
+可用工具：
 - list_directories：查看目录树，可传 query/page/page_size。
 - list_directory_info：查看目录统计，可传 directory_path 或 directory_paths，也可传 query/page/page_size。
 - list_media_descriptions：分页读取媒体描述，可传 directory_path/media_type/page/page_size/sort/date_from/date_to；page_size 最大 50。
 - search_descriptions：基于已有摘要做关键词/向量检索，可传 query/directory_path/media_type/limit/date_from/date_to。
 - select_media：从当前候选或已读描述中选择媒体，可传 media_ids。
-- answer_now：输出最终回答。arguments 必须是最终回答 JSON。
 
-最终回答 JSON：
+每轮输出 JSON：
 {
-  "answer_type": "answer | summary | media_selection",
-  "answer": "...",
-  "selected_media_ids": [],
-  "confidence": "high | medium | low",
-  "checked_scope_summary": "...",
-  "limitations": "如果信息不足，说明哪里不足"
+  "response_mode": "answer | use_tool",
+  "visible_response": {
+    "text": "给用户看的自然语言；use_tool 时可以为空，answer 时必须完整回答。",
+    "answer_type": "answer | summary | media_selection",
+    "confidence": "high | medium | low",
+    "checked_scope_summary": "检查过哪些目录、时间范围、页码或候选。",
+    "limitations": "如果信息不足，说明哪里不足。"
+  },
+  "tool_request": {
+    "name": "list_directories | list_directory_info | list_media_descriptions | search_descriptions | select_media",
+    "reason_summary": "简短说明为什么这样做，不要输出隐藏推理。",
+    "arguments": {}
+  },
+  "media": {
+    "selected_media_ids": []
+  },
+  "visible_memory_update": {
+    "known_facts": [],
+    "checked_scopes": [],
+    "candidate_media_ids": [],
+    "rejected_scopes": []
+  }
 }
 
+当 response_mode 是 answer 时，不需要 tool_request，后端会直接输出 visible_response.text。
+当 response_mode 是 use_tool 时，必须提供 tool_request。
+只有用户要找具体照片/视频时，answer_type 才用 media_selection，media.selected_media_ids 才填值。
 选择媒体时 selected_media_ids 只能来自 Context Pack 的 read_description_pages 或 candidate_media。
 如果媒体太多，不要一次性假装已读完；先分页读取或搜索，再更新 visible_memory。
 只返回符合 schema 的 JSON。"""
@@ -103,9 +165,12 @@ reason_summary 只写一句可见的简短理由。
 
 @dataclass(frozen=True)
 class MediaAgentAction:
+    response_mode: str
     action: str
     reason_summary: str
     arguments: dict[str, Any]
+    visible_response: dict[str, Any]
+    media: dict[str, Any]
     visible_memory_update: VisibleMemory
 
 
@@ -139,12 +204,14 @@ async def run_media_library_agent_turn_events(
 ) -> Any:
     settings = get_settings()
     model_name = settings.default_ai_search_model.strip() or settings.default_summary_model
+    max_agent_turns = _agent_max_turns(settings)
     base_context = build_context_pack(db, request, history)
+    db.close()
     visible_memory = base_context.visible_memory
     read_pages: list[dict[str, Any]] = []
     candidate_media: list[dict[str, Any]] = []
 
-    for turn in range(1, MAX_AGENT_TURNS + 1):
+    for turn in range(1, max_agent_turns + 1):
         context_pack = replace(
             base_context,
             visible_memory=visible_memory,
@@ -157,6 +224,7 @@ async def run_media_library_agent_turn_events(
                 model_name=model_name,
                 request=request,
                 context_pack=context_pack,
+                max_agent_turns=max_agent_turns,
             )
         except Exception as exc:
             async for event in _fallback_events(
@@ -164,7 +232,7 @@ async def run_media_library_agent_turn_events(
                 ollama=ollama,
                 request=request,
                 model_name=model_name,
-                reason=f"模型 action JSON 失败，已回退到关键词/向量检索：{exc}",
+                reason=f"模型 Agent JSON 失败，已回退到关键词/向量检索：{exc}",
             ):
                 yield event
             return
@@ -174,23 +242,27 @@ async def run_media_library_agent_turn_events(
             "agent_action",
             {
                 "turn": turn,
+                "response_mode": action.response_mode,
                 "action": action.action,
                 "tool": action.action,
                 "reason_summary": action.reason_summary,
                 "summary": action.reason_summary,
                 "arguments": _public_arguments(action.arguments),
+                "visible_response": _public_visible_response(action.visible_response),
+                "media": _public_media_selection(action.media),
                 "visible_memory": visible_memory.to_prompt_payload(),
             },
         )
 
         if action.action == "answer_now":
             final_answer = _normalize_final_answer(
-                action.arguments,
+                _final_answer_payload_from_action(action),
                 allowed_media_ids=_known_media_ids(read_pages, candidate_media),
             )
             selected = _candidate_payloads_for_ids(db, final_answer.selected_media_ids, candidate_media, read_pages)
             final_answer = replace(final_answer, selected_media_ids=[item["media_id"] for item in selected])
             blocks = _blocks_from_final_answer(final_answer, selected)
+            db.close()
             yield AgentEvent("visible_memory", {"visible_memory": visible_memory.to_prompt_payload()})
             yield AgentEvent("final_answer", {"final_answer": final_answer.to_payload()})
             async for event in stream_blocks(blocks):
@@ -200,7 +272,9 @@ async def run_media_library_agent_turn_events(
 
         try:
             result = await _execute_action(db, ollama, request, action)
+            db.close()
         except Exception as exc:
+            db.close()
             async for event in _fallback_events(
                 db=db,
                 ollama=ollama,
@@ -247,6 +321,7 @@ async def _ask_agent_action(
     model_name: str,
     request: ChatStreamRequest,
     context_pack: AgentContextPack,
+    max_agent_turns: int,
 ) -> MediaAgentAction:
     prompt = f"""用户原始问题：
 {request.message}
@@ -254,30 +329,81 @@ async def _ask_agent_action(
 Context Pack：
 {json.dumps(context_pack.planner_payload(), ensure_ascii=False, default=str)}
 
-请根据当前 Context Pack 选择下一步 action。"""
+当前 Agent 最大轮数：{max_agent_turns}
+
+请先判断当前 Context Pack 是否已经足够回答，不要默认搜索或分页；只有存在必须补齐的信息缺口时才调用工具。请返回一个 JSON envelope：response_mode、visible_response、tool_request、media、visible_memory_update。"""
     raw = await ollama.generate_text_json(
         model=model_name,
         prompt=prompt,
         schema=MEDIA_LIBRARY_ACTION_SCHEMA,
-        system_prompt=MEDIA_LIBRARY_AGENT_SYSTEM_PROMPT,
+        system_prompt=_agent_system_prompt(max_agent_turns),
     )
     return _normalize_action(raw)
 
 
+def _agent_system_prompt(max_agent_turns: int) -> str:
+    return MEDIA_LIBRARY_AGENT_SYSTEM_PROMPT.replace("{{max_agent_turns}}", str(max_agent_turns))
+
+
+def _agent_max_turns(settings: Any) -> int:
+    try:
+        turns = int(getattr(settings, "ai_search_max_turns", 8))
+    except (TypeError, ValueError):
+        turns = 8
+    return max(1, min(30, turns))
+
+
 def _normalize_action(raw: dict[str, Any]) -> MediaAgentAction:
-    action = clean_text(raw.get("action"))
-    if action not in ACTION_NAMES:
-        raise ValueError("Agent action is missing or invalid")
-    arguments = raw.get("arguments")
-    if not isinstance(arguments, dict):
-        arguments = {}
+    visible_response = raw.get("visible_response")
+    if not isinstance(visible_response, dict):
+        visible_response = {}
+    media = raw.get("media")
+    if not isinstance(media, dict):
+        media = {}
     memory = raw.get("visible_memory_update")
     if not isinstance(memory, dict):
         memory = {}
+
+    response_mode = clean_text(raw.get("response_mode")).lower()
+    if response_mode in RESPONSE_MODES:
+        if response_mode == "answer":
+            action = "answer_now"
+            arguments: dict[str, Any] = {}
+            reason_summary = clean_text(raw.get("reason_summary")) or "直接回答"
+        else:
+            tool_request = raw.get("tool_request")
+            if not isinstance(tool_request, dict):
+                tool_request = {}
+            action = clean_text(tool_request.get("name"))
+            arguments = tool_request.get("arguments")
+            reason_summary = clean_text(tool_request.get("reason_summary")) or clean_text(raw.get("reason_summary"))
+            if action not in TOOL_ACTION_NAMES:
+                raise ValueError("Agent tool_request is missing or invalid")
+            if not isinstance(arguments, dict):
+                arguments = {}
+    else:
+        action_node = raw.get("action")
+        if isinstance(action_node, dict):
+            action = clean_text(action_node.get("name") or action_node.get("action"))
+            arguments = action_node.get("arguments")
+            reason_summary = clean_text(action_node.get("reason_summary")) or clean_text(raw.get("reason_summary"))
+        else:
+            action = clean_text(action_node)
+            arguments = raw.get("arguments")
+            reason_summary = clean_text(raw.get("reason_summary"))
+        if action not in ACTION_NAMES:
+            raise ValueError("Agent action is missing or invalid")
+        if not isinstance(arguments, dict):
+            arguments = {}
+        response_mode = "answer" if action == "answer_now" else "use_tool"
+
     return MediaAgentAction(
+        response_mode=response_mode,
         action=action,
-        reason_summary=clip_text(clean_text(raw.get("reason_summary")) or f"执行 {action}", 160),
+        reason_summary=clip_text(reason_summary or f"执行 {action}", 160),
         arguments=arguments,
+        visible_response=visible_response,
+        media=media,
         visible_memory_update=VisibleMemory(
             known_facts=_string_list(memory.get("known_facts"), limit=20),
             checked_scopes=_string_list(memory.get("checked_scopes"), limit=20),
@@ -445,7 +571,7 @@ async def _fallback_events(
     )
     scoped_explanation = _no_media_scope_explanation(db, request) if not allow_media_search else None
     fallback_answer = (
-        "模型没有返回可用的 action JSON，我已回退到已有摘要的关键词/向量检索。"
+        "模型没有返回可用的 Agent JSON，我已回退到已有摘要的关键词/向量检索。"
         if candidates
         else "没有找到符合当前问题范围的已分析媒体。"
     )
@@ -468,6 +594,7 @@ async def _fallback_events(
         ),
     )
     blocks = _blocks_from_final_answer(final, candidates[: request.limit])
+    db.close()
     yield AgentEvent(
         "tool_result",
         {
@@ -508,6 +635,7 @@ async def _search_description_candidates(
         )
     stmt = _apply_media_filters(db, stmt, request, arguments)
     rows = db.execute(stmt).all()
+    db.close()
     query_vector = await _query_vector(db, ollama, query) if rows else None
     scored: list[tuple[float, dict[str, Any]]] = []
     for media, summary, embedding in rows:
@@ -740,7 +868,9 @@ def _searchable_text(summary: MediaAiSummary) -> str:
 
 async def _query_vector(db: Session, ollama: OllamaClient, query: str) -> list[float] | None:
     model_name = get_settings().default_embedding_model.strip()
-    if not model_name or _embedding_profile_id(db) is None:
+    profile_id = _embedding_profile_id(db) if model_name else None
+    db.close()
+    if not model_name or profile_id is None:
         return None
     try:
         return await ollama.embed_text(model=model_name, text=query)
@@ -755,8 +885,44 @@ def _embedding_profile_id(db: Session):
     return db.scalar(select(EmbeddingProfile.id).where(EmbeddingProfile.model_name == model_name))
 
 
+def _final_answer_payload_from_action(action: MediaAgentAction) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    legacy = action.arguments.get("final_answer") if isinstance(action.arguments.get("final_answer"), dict) else action.arguments
+    if isinstance(legacy, dict):
+        payload.update(legacy)
+
+    visible = action.visible_response if isinstance(action.visible_response, dict) else {}
+    text = clean_text(visible.get("text")) or clean_text(visible.get("answer"))
+    if text:
+        payload["answer"] = text
+    for key in ("answer_type", "confidence", "checked_scope_summary", "limitations"):
+        value = clean_text(visible.get(key))
+        if value:
+            payload[key] = value
+
+    media_ids = action.media.get("selected_media_ids") if isinstance(action.media, dict) else None
+    if isinstance(media_ids, list):
+        payload["selected_media_ids"] = media_ids
+    elif isinstance(visible.get("selected_media_ids"), list):
+        payload["selected_media_ids"] = visible["selected_media_ids"]
+    return payload
+
+
 def _normalize_final_answer(raw: dict[str, Any], *, allowed_media_ids: set[str]) -> FinalAnswer:
     payload = raw.get("final_answer") if isinstance(raw.get("final_answer"), dict) else raw
+    if isinstance(raw.get("visible_response"), dict):
+        payload = dict(payload)
+        visible = raw["visible_response"]
+        text = clean_text(visible.get("text")) or clean_text(visible.get("answer"))
+        if text:
+            payload["answer"] = text
+        for key in ("answer_type", "confidence", "checked_scope_summary", "limitations"):
+            value = clean_text(visible.get(key))
+            if value:
+                payload[key] = value
+    if isinstance(raw.get("media"), dict) and isinstance(raw["media"].get("selected_media_ids"), list):
+        payload = dict(payload)
+        payload["selected_media_ids"] = raw["media"]["selected_media_ids"]
     answer_type = clean_text(payload.get("answer_type"))
     if answer_type not in ANSWER_TYPES:
         answer_type = "answer"
@@ -920,8 +1086,39 @@ def _public_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
     return {
         key: value
         for key, value in arguments.items()
-        if key in {"directory_path", "directory_paths", "media_type", "page", "page_size", "sort", "query", "limit", "media_ids"}
+        if key
+        in {
+            "directory_path",
+            "directory_paths",
+            "media_type",
+            "page",
+            "page_size",
+            "sort",
+            "query",
+            "limit",
+            "media_ids",
+            "date_from",
+            "date_to",
+        }
     }
+
+
+def _public_visible_response(visible_response: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(visible_response, dict):
+        return {}
+    return {
+        "text": clip_text(clean_text(visible_response.get("text")) or clean_text(visible_response.get("answer")), 500),
+        "answer_type": clean_text(visible_response.get("answer_type")),
+        "confidence": clean_text(visible_response.get("confidence")),
+        "checked_scope_summary": clip_text(clean_text(visible_response.get("checked_scope_summary")), 300),
+        "limitations": clip_text(clean_text(visible_response.get("limitations")), 300),
+    }
+
+
+def _public_media_selection(media: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(media, dict):
+        return {"selected_media_ids": []}
+    return {"selected_media_ids": _uuid_string_list(media.get("selected_media_ids"), limit=100)}
 
 
 def _page_args(arguments: dict[str, Any], *, default_page_size: int = DEFAULT_PAGE_SIZE) -> tuple[int, int]:

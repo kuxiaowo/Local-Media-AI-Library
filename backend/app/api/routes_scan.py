@@ -15,7 +15,7 @@ from app.models.schemas import (
     ScanStartRequest,
     ScanStatusResponse,
 )
-from app.services.job_service import create_job, scan_status
+from app.services.job_service import create_job, enqueue_job, scan_status
 from app.services.media_visibility import effective_enabled_rules, is_rule_effectively_enabled, visible_media_filter
 
 router = APIRouter(prefix="/scan", tags=["scan"])
@@ -102,8 +102,12 @@ def generate_ai_records(payload: GenerateAiRecordsRequest, db: Session = Depends
             continue
         media.error_message = None
         db.add(media)
-        jobs.append(create_job(db, job_type=job_type, target_id=media.id, target_path=media.path))
+        jobs.append(enqueue_job(db, job_type=job_type, target_id=media.id, target_path=media.path))
         queued_media_ids.add(media.id)
+    if jobs:
+        db.commit()
+        for job in jobs:
+            db.refresh(job)
     return jobs
 
 

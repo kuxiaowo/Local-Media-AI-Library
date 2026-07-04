@@ -147,10 +147,13 @@ def update_media_background_context(
 
 @router.get("/{media_id}/thumbnail")
 def get_thumbnail(media_id: uuid.UUID, db: Session = Depends(get_db)) -> FileResponse:
-    media = db.get(MediaFile, media_id)
-    if media is None or not media.thumbnail_path:
-        raise HTTPException(status_code=404, detail="Thumbnail not found")
-    path = Path(media.thumbnail_path)
+    try:
+        media = db.get(MediaFile, media_id)
+        if media is None or not media.thumbnail_path:
+            raise HTTPException(status_code=404, detail="Thumbnail not found")
+        path = Path(media.thumbnail_path)
+    finally:
+        db.close()
     if not path.exists():
         raise HTTPException(status_code=404, detail="Thumbnail file not found")
     return FileResponse(path)
@@ -158,15 +161,17 @@ def get_thumbnail(media_id: uuid.UUID, db: Session = Depends(get_db)) -> FileRes
 
 @router.get("/{media_id}/frames/{frame_id}")
 def get_video_frame(media_id: uuid.UUID, frame_id: uuid.UUID, db: Session = Depends(get_db)) -> FileResponse:
-    frame = db.get(VideoFrameSummary, frame_id)
-    if frame is None or frame.media_id != media_id:
-        raise HTTPException(status_code=404, detail="Video frame not found")
-    media = db.get(MediaFile, media_id)
-    if media is None:
-        raise HTTPException(status_code=404, detail="Media not found")
-    _assert_media_is_under_known_root(db, media)
-
-    path = Path(frame.frame_path)
+    try:
+        frame = db.get(VideoFrameSummary, frame_id)
+        if frame is None or frame.media_id != media_id:
+            raise HTTPException(status_code=404, detail="Video frame not found")
+        media = db.get(MediaFile, media_id)
+        if media is None:
+            raise HTTPException(status_code=404, detail="Media not found")
+        _assert_media_is_under_known_root(db, media)
+        path = Path(frame.frame_path)
+    finally:
+        db.close()
     if not path.exists():
         raise HTTPException(status_code=404, detail="Video frame file not found")
     try:
@@ -178,11 +183,14 @@ def get_video_frame(media_id: uuid.UUID, frame_id: uuid.UUID, db: Session = Depe
 
 @router.get("/{media_id}/preview")
 def get_preview(media_id: uuid.UUID, db: Session = Depends(get_db)) -> FileResponse:
-    media = db.get(MediaFile, media_id)
-    if media is None:
-        raise HTTPException(status_code=404, detail="Media not found")
-    _assert_media_is_under_known_root(db, media)
-    path = Path(media.path)
+    try:
+        media = db.get(MediaFile, media_id)
+        if media is None:
+            raise HTTPException(status_code=404, detail="Media not found")
+        _assert_media_is_under_known_root(db, media)
+        path = Path(media.path)
+    finally:
+        db.close()
     if not path.exists():
         raise HTTPException(status_code=404, detail="Media file not found")
     return FileResponse(path)
@@ -218,11 +226,14 @@ def reanalyze_final_summary(media_id: uuid.UUID, db: Session = Depends(get_db)):
 
 @router.post("/{media_id}/open-location")
 def open_location(media_id: uuid.UUID, db: Session = Depends(get_db)) -> dict[str, bool]:
-    media = db.get(MediaFile, media_id)
-    if media is None:
-        raise HTTPException(status_code=404, detail="Media not found")
-    _assert_media_is_under_known_root(db, media)
-    path = Path(media.path)
+    try:
+        media = db.get(MediaFile, media_id)
+        if media is None:
+            raise HTTPException(status_code=404, detail="Media not found")
+        _assert_media_is_under_known_root(db, media)
+        path = Path(media.path)
+    finally:
+        db.close()
     if not path.exists():
         raise HTTPException(status_code=404, detail="Media file not found")
     if os.name == "nt":

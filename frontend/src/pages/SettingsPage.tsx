@@ -27,6 +27,7 @@ import type { DirectoryRuleDefaults, RuntimeSettings } from '../types';
 const emptyRuntimeSettings: RuntimeSettings = {
   default_embedding_model: 'nomic-embed-text',
   default_ai_search_model: 'qwen3:8b',
+  ai_search_max_turns: 8,
   max_image_long_edge: 1280,
   scan_worker_concurrency: 1,
   metadata_worker_concurrency: 6,
@@ -168,39 +169,74 @@ const finalSummaryPromptBlocks: ReadOnlyPromptBlock[] = [
 const agentPromptBlocks: ReadOnlyPromptBlock[] = [
   {
     title: 'System prompt：MediaLibraryAgent',
-    description: '每一轮 action 决策都会作为 system prompt 传入，约束 Agent 只能基于已有摘要、目录、时间和背景信息工作。',
+    description: '每一轮 response_mode 决策都会作为 system prompt 传入，约束 Agent 只能基于已有摘要、目录、时间和背景信息工作。',
     kind: 'fixed',
     content: `你是本地媒体库 MediaLibraryAgent。
 你只能基于 Context Pack 和工具返回的已有文本信息回答：媒体摘要、目录信息、时间信息、背景信息、视频分段文字。
 你不能要求重新读取原图、视频、音频或缩略图，也不能假设自己看过原始媒体。
-每轮只返回一个 JSON action，不要输出 Markdown，不要输出长篇 chain-of-thought。
+每轮只返回一个 JSON，不要输出 Markdown，不要输出长篇 chain-of-thought。
 reason_summary 只写一句可见的简短理由。
+visible_response.text 是给用户看的自然语言回答槽位；当 response_mode 是 answer 时必须写清楚回答、原因、范围或限制。
 
-可用 action：
+决策原则：
+1. 先判断用户真正要什么，再判断当前 Context Pack 是否已经足够回答；足够时 response_mode 必须是 answer。
+2. 工具不是默认步骤。只有存在明确的信息缺口，并且该工具能补齐这个缺口时，才调用工具。
+3. 如果 response_mode 是 use_tool，每轮选择成本最低、范围最窄、最能补齐缺口的 tool_request；不要为了“更完整”而搜索、分页或扩大范围。
+4. 如果用户明确要求“直接回答/直接输出/自然语言输出/不要搜索/不要使用某工具”，必须尊重这个约束；response_mode 应为 answer，且不要输出 tool_request。
+5. 概览、目录、统计、时间跨度、背景分布等结构化问题，优先使用 Context Pack、list_directories 或 list_directory_info。
+6. 具体事件、画面内容、文本细节、人物动作等需要从大量媒体摘要中召回时，才使用 search_descriptions 或 list_media_descriptions。
+7. 用户没有要求找具体照片/视频时，不要为了回答而生成媒体候选或媒体卡片。
+8. Agent 最大轮数来自运行设置；不要重复调用不能带来新信息的工具，信息不足时应使用 response_mode=answer 并说明检查范围和限制。
+
+选择 response_mode 前先完成这个可见决策检查，但不要输出长篇推理：
+- 用户是否禁止了某个工具或要求直接自然语言回答？如果是，遵守它。
+- 当前 Context Pack 的哪些字段已经能回答问题？
+- 还缺什么信息？缺口是否必须通过工具补齐？
+- 如果没有必要的新信息缺口，response_mode 必须是 answer。
+
+可用工具：
 - list_directories：查看目录树，可传 query/page/page_size。
 - list_directory_info：查看目录统计，可传 directory_path 或 directory_paths，也可传 query/page/page_size。
 - list_media_descriptions：分页读取媒体描述，可传 directory_path/media_type/page/page_size/sort/date_from/date_to；page_size 最大 50。
 - search_descriptions：基于已有摘要做关键词/向量检索，可传 query/directory_path/media_type/limit/date_from/date_to。
 - select_media：从当前候选或已读描述中选择媒体，可传 media_ids。
-- answer_now：输出最终回答。arguments 必须是最终回答 JSON。
 
-最终回答 JSON：
+每轮输出 JSON：
 {
-  "answer_type": "answer | summary | media_selection",
-  "answer": "...",
-  "selected_media_ids": [],
-  "confidence": "high | medium | low",
-  "checked_scope_summary": "...",
-  "limitations": "如果信息不足，说明哪里不足"
+  "response_mode": "answer | use_tool",
+  "visible_response": {
+    "text": "给用户看的自然语言；use_tool 时可以为空，answer 时必须完整回答。",
+    "answer_type": "answer | summary | media_selection",
+    "confidence": "high | medium | low",
+    "checked_scope_summary": "检查过哪些目录、时间范围、页码或候选。",
+    "limitations": "如果信息不足，说明哪里不足。"
+  },
+  "tool_request": {
+    "name": "list_directories | list_directory_info | list_media_descriptions | search_descriptions | select_media",
+    "reason_summary": "简短说明为什么这样做，不要输出隐藏推理。",
+    "arguments": {}
+  },
+  "media": {
+    "selected_media_ids": []
+  },
+  "visible_memory_update": {
+    "known_facts": [],
+    "checked_scopes": [],
+    "candidate_media_ids": [],
+    "rejected_scopes": []
+  }
 }
 
+当 response_mode 是 answer 时，不需要 tool_request，后端会直接输出 visible_response.text。
+当 response_mode 是 use_tool 时，必须提供 tool_request。
+只有用户要找具体照片/视频时，answer_type 才用 media_selection，media.selected_media_ids 才填值。
 选择媒体时 selected_media_ids 只能来自 Context Pack 的 read_description_pages 或 candidate_media。
 如果媒体太多，不要一次性假装已读完；先分页读取或搜索，再更新 visible_memory。
 只返回符合 schema 的 JSON。`,
   },
   {
     title: 'User prompt：Action 决策请求',
-    description: '每一轮都会把用户原始问题和最新 Context Pack 拼成 user prompt，要求模型只选择下一步 action。',
+    description: '每一轮都会把用户原始问题和最新 Context Pack 拼成 user prompt，要求模型返回统一 JSON envelope。',
     kind: 'dynamic',
     content: `用户原始问题：
 <request.message>
@@ -208,7 +244,9 @@ reason_summary 只写一句可见的简短理由。
 Context Pack：
 <JSON.stringify(context_pack.planner_payload())>
 
-请根据当前 Context Pack 选择下一步 action。`,
+当前 Agent 最大轮数：<运行设置 ai_search_max_turns>
+
+请先判断当前 Context Pack 是否已经足够回答，不要默认搜索或分页；只有存在必须补齐的信息缺口时才调用工具。请返回一个 JSON envelope：response_mode、visible_response、tool_request、media、visible_memory_update。`,
   },
   {
     title: '动态注入：Context Pack',
@@ -257,13 +295,26 @@ Context Pack：
 }`,
   },
   {
-    title: '固定约束：Action JSON Schema',
-    description: '通过 Ollama format 字段传入。模型每轮必须返回一个 action，不允许输出自然语言散文。',
+    title: '固定约束：Agent JSON Schema',
+    description: '通过 Ollama format 字段传入。模型每轮必须返回 JSON；自然语言回答放在 visible_response.text。',
     kind: 'fixed',
     content: `{
-  "action": "answer_now | list_directories | list_directory_info | list_media_descriptions | search_descriptions | select_media",
-  "reason_summary": "简短说明为什么这样做",
-  "arguments": {},
+  "response_mode": "answer | use_tool",
+  "visible_response": {
+    "text": "给用户看的自然语言；answer 模式时必须完整填写。",
+    "answer_type": "answer | summary | media_selection",
+    "confidence": "high | medium | low",
+    "checked_scope_summary": "检查范围摘要",
+    "limitations": "限制或信息不足说明"
+  },
+  "tool_request": {
+    "name": "list_directories | list_directory_info | list_media_descriptions | search_descriptions | select_media",
+    "reason_summary": "简短说明为什么这样做",
+    "arguments": {}
+  },
+  "media": {
+    "selected_media_ids": []
+  },
   "visible_memory_update": {
     "known_facts": [],
     "checked_scopes": [],
@@ -274,7 +325,7 @@ Context Pack：
   },
   {
     title: '工具流程：目录与摘要读取',
-    description: '这些 action 由后端执行，只读数据库里已有的目录、摘要、关键词、时间和背景信息。',
+    description: '这些 tool_request 由后端执行，只读数据库里已有的目录、摘要、关键词、时间和背景信息。',
     kind: 'fixed',
     content: `list_directories
 - 返回目录树，可按 query/page/page_size 分页。
@@ -316,16 +367,27 @@ select_media
 }`,
   },
   {
-    title: '最终输出：answer_now',
-    description: '当信息足够或确认不足时，Agent 用 answer_now 输出最终 JSON；后端再转换成现有聊天 blocks 和媒体卡片。',
+    title: '最终输出：response_mode=answer',
+    description: '当信息足够或确认不足时，Agent 输出 response_mode=answer；后端使用 visible_response.text 生成聊天 blocks。',
     kind: 'fixed',
     content: `{
-  "answer_type": "answer | summary | media_selection",
-  "answer": "给用户看的中文回答；如果没有找到，也要说明检查范围和原因。",
-  "selected_media_ids": ["<只有找具体照片/视频时才返回>"],
-  "confidence": "high | medium | low",
-  "checked_scope_summary": "检查过哪些目录、日期范围、页码或候选。",
-  "limitations": "信息不足时说明不足在哪里。"
+  "response_mode": "answer",
+  "visible_response": {
+    "text": "给用户看的中文回答；如果没有找到，也要说明检查范围和原因。",
+    "answer_type": "answer | summary | media_selection",
+    "confidence": "high | medium | low",
+    "checked_scope_summary": "检查过哪些目录、日期范围、页码或候选。",
+    "limitations": "信息不足时说明不足在哪里。"
+  },
+  "media": {
+    "selected_media_ids": ["<只有找具体照片/视频时才返回>"]
+  },
+  "visible_memory_update": {
+    "known_facts": [],
+    "checked_scopes": [],
+    "candidate_media_ids": [],
+    "rejected_scopes": []
+  }
 }`,
   },
   {
@@ -337,7 +399,7 @@ select_media
 - 仍然尊重用户显式目录、媒体类型和日期范围。
 
 达到最大轮数：
-- 不再做无范围向量兜底。
+- Agent 最大轮数由运行设置控制；达到限制后不再做无范围向量兜底。
 - 输出 answer 类型说明检查范围、库内时间跨度、可能原因。
 - 不返回媒体卡片，避免把其他年份的照片当成结果。`,
   },
@@ -916,6 +978,18 @@ export function SettingsPage() {
             />
             <p className="mt-1 text-xs leading-5 text-slate-500">
               AI 检索会把已生成的媒体摘要文本交给这个本地模型，用于总结文件夹、推荐照片和精确重排候选结果。
+            </p>
+          </div>
+          <div>
+            <NumberField
+              label="Agent 最大轮数"
+              min={1}
+              max={30}
+              value={runtimeForm.ai_search_max_turns}
+              onChange={(value) => setRuntimeForm({ ...runtimeForm, ai_search_max_turns: value })}
+            />
+            <p className="mt-1 text-xs leading-5 text-slate-500">
+              每次 Agent 对话最多允许多少轮“判断或工具调用”。调低可减少无效搜索，调高可让复杂问题有更多分页检查机会。
             </p>
           </div>
           <div>

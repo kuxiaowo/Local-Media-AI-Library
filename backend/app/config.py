@@ -13,6 +13,10 @@ class Settings(BaseSettings):
     app_host: str = "0.0.0.0"
     app_port: int = 8000
     database_url: str = "mysql+pymysql://media_ai:media_ai@localhost:3306/media_ai?charset=utf8mb4"
+    database_pool_size: int = Field(default=10, ge=1)
+    database_max_overflow: int = Field(default=20, ge=0)
+    database_pool_timeout_seconds: int = Field(default=30, ge=1)
+    database_pool_recycle_seconds: int = Field(default=1800, ge=1)
 
     ollama_base_url: str = "http://localhost:11434"
     ollama_timeout_seconds: int = 180
@@ -33,6 +37,7 @@ class Settings(BaseSettings):
     default_vision_model: str = "qwen2.5vl:7b"
     default_summary_model: str = "qwen3:8b"
     default_ai_search_model: str = "qwen3:8b"
+    ai_search_max_turns: int = Field(default=8, ge=1, le=30)
     default_embedding_model: str = "nomic-embed-text"
     default_embedding_dimensions: int = 768
 

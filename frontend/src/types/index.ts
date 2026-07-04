@@ -226,6 +226,7 @@ export interface OllamaModels {
 export interface RuntimeSettings {
   default_embedding_model: string;
   default_ai_search_model: string;
+  ai_search_max_turns: number;
   max_image_long_edge: number;
   scan_worker_concurrency: number;
   metadata_worker_concurrency: number;

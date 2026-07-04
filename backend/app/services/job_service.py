@@ -8,6 +8,27 @@ from sqlalchemy.orm import Session
 
 from app.models.db_models import Job, MediaFile
 
+ACTIVE_JOB_STATUSES = ("queued", "running")
+
+
+def enqueue_job(
+    db: Session,
+    *,
+    job_type: str,
+    target_id: uuid.UUID | None = None,
+    target_path: str | None = None,
+    payload: dict | None = None,
+) -> Job:
+    job = Job(
+        id=uuid.uuid4(),
+        job_type=job_type,
+        target_id=target_id,
+        target_path=target_path,
+        payload=payload or {},
+    )
+    db.add(job)
+    return job
+
 
 def create_job(
     db: Session,
@@ -17,11 +38,30 @@ def create_job(
     target_path: str | None = None,
     payload: dict | None = None,
 ) -> Job:
-    job = Job(job_type=job_type, target_id=target_id, target_path=target_path, payload=payload or {})
-    db.add(job)
+    job = enqueue_job(
+        db,
+        job_type=job_type,
+        target_id=target_id,
+        target_path=target_path,
+        payload=payload,
+    )
     db.commit()
     db.refresh(job)
     return job
+
+
+def active_job_target_ids(db: Session, job_types: set[str] | tuple[str, ...]) -> set[uuid.UUID]:
+    if not job_types:
+        return set()
+    return set(
+        db.scalars(
+            select(Job.target_id).where(
+                Job.job_type.in_(list(job_types)),
+                Job.status.in_(ACTIVE_JOB_STATUSES),
+                Job.target_id.is_not(None),
+            )
+        ).all()
+    )
 
 
 def mark_running(job: Job) -> None:

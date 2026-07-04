@@ -21,6 +21,7 @@ import {
   listDirectoryRules,
   updateDirectoryRule,
 } from '../api/directoryRules';
+import { listMediaDirectories } from '../api/media';
 import { getOllamaModels } from '../api/models';
 import { generateAiRecords, startScan } from '../api/scan';
 import {
@@ -31,7 +32,7 @@ import {
   getDefaultVideoSegmentPrompt,
   getDirectoryRuleDefaults,
 } from '../api/settings';
-import type { DirectoryRule, DirectoryRuleDefaults, DirectoryRulePayload } from '../types';
+import type { DirectoryRule, DirectoryRuleDefaults, DirectoryRulePayload, MediaDirectory } from '../types';
 
 const fallbackDirectoryRuleDefaults: DirectoryRuleDefaults = {
   recursive: true,
@@ -95,6 +96,7 @@ type DirectoryRuleTreeNode = DirectoryRule & {
   children: DirectoryRuleTreeNode[];
   parentPath: string | null;
   parentDisplayPath: string | null;
+  rule: DirectoryRule | null;
 };
 
 export function LibrarySettingsPage() {
@@ -105,6 +107,10 @@ export function LibrarySettingsPage() {
   const [appliedSettingsTarget, setAppliedSettingsTarget] = useState<string | null>(null);
   const [expandedAction, setExpandedAction] = useState<ExpandedDirectoryAction>(null);
   const rulesQuery = useQuery({ queryKey: ['directory-rules'], queryFn: listDirectoryRules });
+  const mediaDirectoriesQuery = useQuery({
+    queryKey: ['media-directories'],
+    queryFn: listMediaDirectories,
+  });
   const modelsQuery = useQuery({ queryKey: ['ollama-models'], queryFn: getOllamaModels });
   const directoryDefaultsQuery = useQuery({
     queryKey: ['directory-rule-defaults'],
@@ -154,7 +160,13 @@ export function LibrarySettingsPage() {
     () => rulesQuery.data?.find((rule) => rule.id === selectedId) ?? null,
     [rulesQuery.data, selectedId],
   );
-  const ruleTree = useMemo(() => buildDirectoryRuleTree(rulesQuery.data ?? []), [rulesQuery.data]);
+  const ruleTree = useMemo(
+    () => buildDirectoryRuleTree(rulesQuery.data ?? [], directoryDefaults, mediaDirectoriesQuery.data ?? []),
+    [directoryDefaults, mediaDirectoriesQuery.data, rulesQuery.data],
+  );
+  const selectedPath = selected
+    ? normalizeDirectoryPath(selected.normalized_path || selected.path)
+    : normalizeDirectoryPath(form.path);
   const [collapsedRulePaths, setCollapsedRulePaths] = useState<Set<string>>(() => new Set());
   const knownCollapsibleRulePaths = useRef<Set<string>>(new Set());
 
@@ -299,6 +311,14 @@ export function LibrarySettingsPage() {
     });
   }
 
+  function selectVirtualRule(path: string) {
+    setSelectedId(null);
+    setForm({
+      ...createDefaultPayload(directoryDefaults, promptDefaults),
+      path: normalizeDisplayPath(path),
+    });
+  }
+
   useEffect(() => {
     if (
       !rulesQuery.data ||
@@ -429,13 +449,15 @@ export function LibrarySettingsPage() {
             <DirectoryRuleTree
               nodes={ruleTree}
               selectedId={selectedId}
+              selectedPath={selectedPath}
               collapsedPaths={collapsedRulePaths}
               toggleDisabled={toggleEnabledMutation.isPending}
               onSelect={selectRule}
+              onSelectVirtual={selectVirtualRule}
               onToggleCollapsed={toggleRuleCollapsed}
               onToggleEnabled={toggleRuleEnabled}
             />
-            {rulesQuery.data?.length === 0 && (
+            {ruleTree.length === 0 && (
               <div className="p-6 text-center text-sm text-slate-500">暂无目录规则</div>
             )}
           </div>
@@ -876,17 +898,21 @@ function DirectoryActionButton({
 function DirectoryRuleTree({
   nodes,
   selectedId,
+  selectedPath,
   collapsedPaths,
   toggleDisabled,
   onSelect,
+  onSelectVirtual,
   onToggleCollapsed,
   onToggleEnabled,
 }: {
   nodes: DirectoryRuleTreeNode[];
   selectedId: string | null;
+  selectedPath: string;
   collapsedPaths: Set<string>;
   toggleDisabled: boolean;
   onSelect: (rule: DirectoryRule) => void;
+  onSelectVirtual: (path: string) => void;
   onToggleCollapsed: (path: string) => void;
   onToggleEnabled: (rule: DirectoryRule, enabled: boolean) => void;
 }) {
@@ -898,9 +924,11 @@ function DirectoryRuleTree({
           node={node}
           level={0}
           selectedId={selectedId}
+          selectedPath={selectedPath}
           collapsedPaths={collapsedPaths}
           toggleDisabled={toggleDisabled}
           onSelect={onSelect}
+          onSelectVirtual={onSelectVirtual}
           onToggleCollapsed={onToggleCollapsed}
           onToggleEnabled={onToggleEnabled}
         />
@@ -913,32 +941,43 @@ function DirectoryRuleTreeItem({
   node,
   level,
   selectedId,
+  selectedPath,
   collapsedPaths,
   toggleDisabled,
   onSelect,
+  onSelectVirtual,
   onToggleCollapsed,
   onToggleEnabled,
 }: {
   node: DirectoryRuleTreeNode;
   level: number;
   selectedId: string | null;
+  selectedPath: string;
   collapsedPaths: Set<string>;
   toggleDisabled: boolean;
   onSelect: (rule: DirectoryRule) => void;
+  onSelectVirtual: (path: string) => void;
   onToggleCollapsed: (path: string) => void;
   onToggleEnabled: (rule: DirectoryRule, enabled: boolean) => void;
 }) {
-  const selected = selectedId === node.id;
-  const visibleChildren = node.enabled ? node.children : [];
+  const selected = node.rule
+    ? selectedId === node.rule.id
+    : selectedId === null && selectedPath === node.normalized_path;
+  const visibleChildren = node.rule?.enabled === false ? [] : node.children;
   const hasChildren = visibleChildren.length > 0;
   const collapsed = collapsedPaths.has(node.normalized_path);
   const Icon = selected || (hasChildren && !collapsed) ? FolderOpen : Folder;
+  const isVirtual = node.rule === null;
 
   return (
     <div>
       <div
         className={`mb-2 flex w-full items-stretch overflow-hidden rounded-md border text-sm transition ${
-          selected ? 'border-accent bg-emerald-50' : 'border-line bg-white hover:border-signal'
+          selected
+            ? 'border-accent bg-emerald-50'
+            : isVirtual
+              ? 'border-dashed border-line bg-slate-50 hover:border-signal'
+              : 'border-line bg-white hover:border-signal'
         }`}
         style={{ marginLeft: `${level * 16}px` }}
       >
@@ -961,7 +1000,7 @@ function DirectoryRuleTreeItem({
         <button
           className="min-w-0 flex-1 p-3 pl-1 text-left"
           type="button"
-          onClick={() => onSelect(node)}
+          onClick={() => (node.rule ? onSelect(node.rule) : onSelectVirtual(node.path))}
           title={normalizeDisplayPath(node.path)}
         >
           <div className="flex min-w-0 items-center gap-2">
@@ -969,19 +1008,43 @@ function DirectoryRuleTreeItem({
             <span className="truncate font-medium">{directoryRuleLabel(node)}</span>
           </div>
           <div className="mt-1 flex items-center gap-2 text-xs text-slate-500">
-            <span>{node.recursive ? '递归扫描' : '仅当前层'}</span>
-            <span>{node.enabled ? '已启用' : '已停用'}</span>
+            {node.rule ? (
+              <>
+                <span>{node.recursive ? '递归扫描' : '仅当前层'}</span>
+                <span>{node.enabled ? '已启用' : '已停用'}</span>
+              </>
+            ) : (
+              <>
+                <span>待新建</span>
+                <span>默认值</span>
+              </>
+            )}
           </div>
-          <div className="mt-2 truncate text-xs text-slate-600">{node.vision_model}</div>
+          <div className="mt-2 truncate text-xs text-slate-600">
+            {node.rule ? node.vision_model : '点击后按目录默认值预填'}
+          </div>
         </button>
-        <div className="flex shrink-0 items-center border-l border-line px-3">
-          <Switch
-            checked={node.enabled}
-            disabled={toggleDisabled}
-            label={node.enabled ? '停用目录' : '启用目录'}
-            onChange={(enabled) => onToggleEnabled(node, enabled)}
-          />
-        </div>
+        {node.rule ? (
+          <div className="flex shrink-0 items-center border-l border-line px-3">
+            <Switch
+              checked={node.enabled}
+              disabled={toggleDisabled}
+              label={node.enabled ? '停用目录' : '启用目录'}
+              onChange={(enabled) => onToggleEnabled(node, enabled)}
+            />
+          </div>
+        ) : (
+          <div className="flex shrink-0 items-center border-l border-line px-3">
+            <button
+              className="icon-btn h-8 w-8"
+              type="button"
+              onClick={() => onSelectVirtual(node.path)}
+              title="按默认值新建这个目录规则"
+            >
+              <FolderPlus className="h-4 w-4" />
+            </button>
+          </div>
+        )}
       </div>
       {!collapsed &&
         visibleChildren.map((child) => (
@@ -990,9 +1053,11 @@ function DirectoryRuleTreeItem({
             node={child}
             level={level + 1}
             selectedId={selectedId}
+            selectedPath={selectedPath}
             collapsedPaths={collapsedPaths}
             toggleDisabled={toggleDisabled}
             onSelect={onSelect}
+            onSelectVirtual={onSelectVirtual}
             onToggleCollapsed={onToggleCollapsed}
             onToggleEnabled={onToggleEnabled}
           />
@@ -1117,20 +1182,45 @@ function normalizedDirectoryRulePayload(payload: DirectoryRulePayload): Director
   };
 }
 
-function buildDirectoryRuleTree(rules: DirectoryRule[]): DirectoryRuleTreeNode[] {
+function buildDirectoryRuleTree(
+  rules: DirectoryRule[],
+  defaults: DirectoryRuleDefaults = fallbackDirectoryRuleDefaults,
+  directories: MediaDirectory[] = [],
+): DirectoryRuleTreeNode[] {
   const nodes = new Map<string, DirectoryRuleTreeNode>();
+  for (const directory of directories) {
+    const path = normalizeDirectoryPath(directory.path);
+    if (!path) {
+      continue;
+    }
+    for (const prefix of directoryPathPrefixes(path, directory.display_path || directory.path)) {
+      if (!nodes.has(prefix.normalized_path)) {
+        nodes.set(prefix.normalized_path, createVirtualDirectoryNode(prefix, defaults));
+      }
+    }
+  }
+
   for (const rule of rules) {
     const path = normalizeDirectoryPath(rule.normalized_path || rule.path);
     if (!path) {
       continue;
     }
-    nodes.set(path, {
-      ...rule,
-      normalized_path: path,
-      children: [],
-      parentPath: null,
-      parentDisplayPath: null,
-    });
+    const prefixes = directoryPathPrefixes(path, rule.path);
+    for (const prefix of prefixes) {
+      const existing = nodes.get(prefix.normalized_path);
+      const isRulePath = prefix.normalized_path === path;
+      nodes.set(prefix.normalized_path, {
+        ...(isRulePath
+          ? rule
+          : existing ?? createVirtualDirectoryNode(prefix, defaults)),
+        normalized_path: prefix.normalized_path,
+        rule: isRulePath ? rule : existing?.rule ?? null,
+        path: isRulePath ? rule.path : existing?.path ?? prefix.path,
+        children: existing?.children ?? [],
+        parentPath: null,
+        parentDisplayPath: null,
+      });
+    }
   }
 
   const sorted = Array.from(nodes.values()).sort(compareDirectoryRuleNodes);
@@ -1150,6 +1240,96 @@ function buildDirectoryRuleTree(rules: DirectoryRule[]): DirectoryRuleTreeNode[]
     sortRuleChildren(root);
   }
   return roots.sort(compareDirectoryRuleNodes);
+}
+
+type DirectoryPathPrefix = {
+  normalized_path: string;
+  path: string;
+};
+
+function directoryPathPrefixes(normalizedPath: string, displayPath: string): DirectoryPathPrefix[] {
+  const normalized = normalizeDirectoryPath(normalizedPath);
+  const display = normalizeDisplayPath(displayPath || normalizedPath);
+  if (!normalized) {
+    return [];
+  }
+
+  const normalizedParts = normalized.split('/');
+  const displayParts = display.replace(/\\/g, '/').replace(/\/+$/, '').split('/');
+  let startIndex = 0;
+  if (/^[a-z]:$/i.test(normalizedParts[0] ?? '')) {
+    startIndex = 1;
+  } else if (normalized.startsWith('//')) {
+    startIndex = 3;
+  } else if (normalized.startsWith('/')) {
+    startIndex = 1;
+  }
+
+  const prefixes: DirectoryPathPrefix[] = [];
+  for (let index = startIndex; index < normalizedParts.length; index += 1) {
+    if (!normalizedParts[index]) {
+      continue;
+    }
+    prefixes.push({
+      normalized_path: composeDirectoryPrefix(normalizedParts, index).toLowerCase(),
+      path: normalizeDisplayPath(composeDirectoryPrefix(displayParts, index)),
+    });
+  }
+
+  if (prefixes.length === 0) {
+    return [{ normalized_path: normalized, path: display }];
+  }
+  return prefixes;
+}
+
+function composeDirectoryPrefix(parts: string[], endIndex: number): string {
+  if (parts[0] === '' && parts[1] === '') {
+    return `//${parts.slice(2, endIndex + 1).join('/')}`;
+  }
+  if (parts[0] === '') {
+    return `/${parts.slice(1, endIndex + 1).join('/')}`;
+  }
+  if (/^[A-Za-z]:$/.test(parts[0] ?? '')) {
+    if (endIndex === 0) {
+      return `${parts[0]}/`;
+    }
+    return `${parts[0]}/${parts.slice(1, endIndex + 1).join('/')}`;
+  }
+  return parts.slice(0, endIndex + 1).join('/');
+}
+
+function createVirtualDirectoryNode(
+  prefix: DirectoryPathPrefix,
+  defaults: DirectoryRuleDefaults,
+): DirectoryRuleTreeNode {
+  return {
+    id: `virtual:${prefix.normalized_path}`,
+    path: prefix.path,
+    normalized_path: prefix.normalized_path,
+    recursive: defaults.recursive,
+    vision_model: defaults.vision_model,
+    summary_model: defaults.summary_model,
+    custom_analysis_prompt: '',
+    background_context: '',
+    background_context_prompt: '',
+    video_segment_prompt: '',
+    video_final_summary_prompt: '',
+    video_frame_strategy: defaults.video_frame_strategy,
+    frame_interval_seconds: defaults.frame_interval_seconds,
+    max_frames_per_video: defaults.max_frames_per_video,
+    video_frame_max_width: defaults.video_frame_max_width,
+    video_frame_max_height: defaults.video_frame_max_height,
+    video_batch_size: defaults.video_batch_size,
+    video_batch_overlap: defaults.video_batch_overlap,
+    analysis_detail: defaults.analysis_detail,
+    enabled: defaults.enabled,
+    created_at: '',
+    updated_at: '',
+    children: [],
+    parentPath: null,
+    parentDisplayPath: null,
+    rule: null,
+  };
 }
 
 function findLongestRuleParent(
