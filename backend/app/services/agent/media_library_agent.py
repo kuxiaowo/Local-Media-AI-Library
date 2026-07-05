@@ -107,13 +107,13 @@ reason_summary 只写一句可见的简短理由。
 visible_response.text 是给用户看的自然语言回答槽位；当 response_mode 是 answer 时必须写清楚回答、原因、范围或限制。
 
 决策原则：
-1. 先判断用户真正要什么，再判断当前 Context Pack 是否已经足够回答；足够时 response_mode 必须是 answer。
+1. 先判断用户真正要什么，再判断当前 Context Pack 是否已经足够回答；足够时 response_mode 必须是 answer。但如果用户的目标是找图、推荐、筛选、选择、比较或展示具体媒体，answer 也应输出 media_selection 和 selected_media_ids，而不是纯文本。
 2. 工具不是默认步骤。只有存在明确的信息缺口，并且该工具能补齐这个缺口时，才调用工具。
 3. 如果 response_mode 是 use_tool，每轮选择成本最低、范围最窄、最能补齐缺口的 tool_request；不要为了“更完整”而搜索、分页或扩大范围。
 4. 如果用户明确要求“直接回答/直接输出/自然语言输出/不要搜索/不要使用某工具”，必须尊重这个约束；response_mode 应为 answer，且不要输出 tool_request。
 5. 概览、目录、统计、时间跨度、背景分布等结构化问题，优先使用 Context Pack、list_directories 或 list_directory_info。
 6. 具体事件、画面内容、文本细节、人物动作等需要从大量媒体摘要中召回时，才使用 search_descriptions 或 list_media_descriptions。
-7. 用户没有要求找具体照片/视频时，不要为了回答而生成媒体候选或媒体卡片。
+7. 用户要找图、找视频、推荐、筛选、挑选“哪张/哪几个”、展示“这些/相关/匹配”的媒体，或问题天然需要给出可点击媒体结果时，最终 answer_type 应为 media_selection，并在 media.selected_media_ids 中填入最匹配的媒体 ID。只有目录结构、统计、概览、原因解释、时间线总结等不需要具体媒体结果的问题，才不要生成媒体卡片。
 8. Agent 最多 {{max_agent_turns}} 轮；不要重复调用不能带来新信息的工具，信息不足时应使用 response_mode=answer 并说明检查范围和限制。
 
 选择 response_mode 前先完成这个可见决策检查，但不要输出长篇推理：
@@ -157,8 +157,8 @@ visible_response.text 是给用户看的自然语言回答槽位；当 response_
 
 当 response_mode 是 answer 时，不需要 tool_request，后端会直接输出 visible_response.text。
 当 response_mode 是 use_tool 时，必须提供 tool_request。
-只有用户要找具体照片/视频时，answer_type 才用 media_selection，media.selected_media_ids 才填值。
-选择媒体时 selected_media_ids 只能来自 Context Pack 的 read_description_pages 或 candidate_media。
+当用户要找图、找视频、推荐、筛选、挑选、比较或展示具体媒体时，answer_type 用 media_selection，media.selected_media_ids 必须填入已读描述或候选中的媒体 ID；不要只用自然语言描述候选。
+选择媒体时 selected_media_ids 只能来自 Context Pack 的 read_description_pages 或 candidate_media。最终媒体卡片的数量、内容和顺序完全按你返回的 selected_media_ids 执行；后端不会按向量分数补齐或重排。
 如果媒体太多，不要一次性假装已读完；先分页读取或搜索，再更新 visible_memory。
 只返回符合 schema 的 JSON。"""
 
@@ -236,6 +236,15 @@ async def run_media_library_agent_turn_events(
             ):
                 yield event
             return
+
+        if (
+            action.action == "answer_now"
+            and _is_media_selection_request(request.message)
+            and not _uuid_string_list(action.media.get("selected_media_ids") if isinstance(action.media, dict) else None, limit=1)
+            and not candidate_media
+            and not read_pages
+        ):
+            action = _forced_media_lookup_action(request)
 
         visible_memory = _merge_visible_memory(visible_memory, action.visible_memory_update)
         yield AgentEvent(
@@ -413,6 +422,67 @@ def _normalize_action(raw: dict[str, Any]) -> MediaAgentAction:
     )
 
 
+def _is_media_selection_request(message: str) -> bool:
+    text = clean_text(message)
+    if not text:
+        return False
+    has_media_noun = any(word in text for word in ("照片", "图片", "图像", "相片", "视频", "影片", "短片", "媒体", "封面", "壁纸"))
+    has_selection_intent = any(
+        word in text
+        for word in (
+            "找",
+            "查找",
+            "搜",
+            "搜索",
+            "推荐",
+            "筛选",
+            "挑",
+            "选",
+            "哪张",
+            "哪几张",
+            "哪几个",
+            "展示",
+            "显示",
+            "给我看",
+            "列出",
+            "卡片",
+        )
+    )
+    if has_media_noun and has_selection_intent:
+        return True
+    return any(pattern in text for pattern in ("找一张", "找几张", "找几段", "推荐几张", "推荐几个", "给我几张"))
+
+
+def _forced_media_lookup_action(request: ChatStreamRequest) -> MediaAgentAction:
+    arguments: dict[str, Any] = {
+        "query": request.message,
+        "limit": request.limit,
+    }
+    if request.media_type in {"image", "video"}:
+        arguments["media_type"] = request.media_type
+    if request.directory_path:
+        arguments["directory_path"] = request.directory_path
+    if request.date_from is not None:
+        arguments["date_from"] = request.date_from.isoformat()
+    if request.date_to is not None:
+        arguments["date_to"] = request.date_to.isoformat()
+    return MediaAgentAction(
+        response_mode="use_tool",
+        action="search_descriptions",
+        reason_summary="用户要找具体媒体，先检索已有媒体摘要。",
+        arguments=arguments,
+        visible_response={
+            "text": "",
+            "answer_type": "media_selection",
+            "confidence": "medium",
+            "checked_scope_summary": "",
+            "limitations": "",
+        },
+        media={"selected_media_ids": []},
+        visible_memory_update=VisibleMemory(),
+    )
+
+
 async def _execute_action(
     db: Session,
     ollama: OllamaClient,
@@ -571,16 +641,16 @@ async def _fallback_events(
     )
     scoped_explanation = _no_media_scope_explanation(db, request) if not allow_media_search else None
     fallback_answer = (
-        "模型没有返回可用的 Agent JSON，我已回退到已有摘要的关键词/向量检索。"
+        "模型没有返回可用的 Agent JSON；已检索到候选媒体，但不会用向量排序直接生成媒体卡片。请重试一次，让 Agent 读取候选后再选择要展示的媒体。"
         if candidates
         else "没有找到符合当前问题范围的已分析媒体。"
     )
     if scoped_explanation is not None:
         fallback_answer = scoped_explanation["answer"]
     final = FinalAnswer(
-        answer_type="media_selection" if candidates else "answer",
+        answer_type="answer",
         answer=fallback_answer,
-        selected_media_ids=[item["media_id"] for item in candidates[: request.limit]],
+        selected_media_ids=[],
         confidence="low",
         checked_scope_summary=(
             f"回退检索检查了已分析媒体摘要，返回 {len(candidates)} 个候选。"
@@ -588,12 +658,12 @@ async def _fallback_events(
             else scoped_explanation["checked_scope_summary"] if scoped_explanation is not None else "已停止继续扩展检索，避免输出与用户时间范围不一致的媒体。"
         ),
         limitations=(
-            "这是 fallback 结果，只基于已有摘要和向量/关键词分数，没有模型逐条阅读分页结果。"
+            "这是 fallback 结果，只基于已有摘要和向量/关键词分数；为避免由向量决定最终卡片，未自动选择媒体。"
             if allow_media_search
             else scoped_explanation["limitations"] if scoped_explanation is not None else "如果该时间段确实没有已扫描并完成 AI 摘要的媒体，Agent 无法回答具体发生了什么。"
         ),
     )
-    blocks = _blocks_from_final_answer(final, candidates[: request.limit])
+    blocks = _blocks_from_final_answer(final, [])
     db.close()
     yield AgentEvent(
         "tool_result",
@@ -927,6 +997,8 @@ def _normalize_final_answer(raw: dict[str, Any], *, allowed_media_ids: set[str])
     if answer_type not in ANSWER_TYPES:
         answer_type = "answer"
     selected = _uuid_string_list(payload.get("selected_media_ids"), limit=100)
+    if selected and answer_type != "media_selection":
+        answer_type = "media_selection"
     if answer_type != "media_selection":
         selected = []
     selected = [media_id for media_id in selected if media_id in allowed_media_ids] if allowed_media_ids else []

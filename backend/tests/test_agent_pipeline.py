@@ -93,6 +93,136 @@ class PagingThenAnswerOllama:
         raise RuntimeError("no embedding in unit test")
 
 
+class MisclassifiedMediaSelectionOllama(PagingThenAnswerOllama):
+    async def generate_text_json(self, **kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            return {
+                "response_mode": "use_tool",
+                "visible_response": {
+                    "text": "",
+                    "answer_type": "answer",
+                    "confidence": "medium",
+                    "checked_scope_summary": "",
+                    "limitations": "",
+                },
+                "tool_request": {
+                    "name": "list_media_descriptions",
+                    "reason_summary": "先读取当前目录的媒体描述。",
+                    "arguments": {
+                        "directory_path": "f:/photos/current",
+                        "media_type": "image",
+                        "page": 1,
+                        "page_size": 40,
+                        "sort": "captured_desc",
+                    },
+                },
+                "media": {"selected_media_ids": []},
+                "visible_memory_update": {
+                    "known_facts": [],
+                    "checked_scopes": ["f:/photos/current 第 1 页"],
+                    "candidate_media_ids": [],
+                    "rejected_scopes": [],
+                },
+            }
+        prompt = kwargs.get("prompt") or ""
+        match = re.search(r'"media_id":\s*"([^"]+)"', prompt)
+        media_id = match.group(1) if match else str(uuid.uuid4())
+        return {
+            "response_mode": "answer",
+            "visible_response": {
+                "text": "找到一张电脑桌面照片。",
+                "answer_type": "summary",
+                "confidence": "high",
+                "checked_scope_summary": "检查了当前目录第 1 页图片描述。",
+                "limitations": "只基于已有摘要。",
+            },
+            "media": {"selected_media_ids": [media_id]},
+            "visible_memory_update": {
+                "known_facts": ["当前目录包含电脑桌面照片"],
+                "checked_scopes": ["f:/photos/current 第 1 页"],
+                "candidate_media_ids": [media_id],
+                "rejected_scopes": [],
+            },
+        }
+
+
+class DirectAnswerForMediaSearchOllama:
+    async def generate_text_json(self, **_kwargs):
+        return {
+            "response_mode": "answer",
+            "visible_response": {
+                "text": "根据目录信息可以直接回答。",
+                "answer_type": "summary",
+                "confidence": "high",
+                "checked_scope_summary": "只看了目录信息。",
+                "limitations": "没有读取媒体候选。",
+            },
+            "media": {"selected_media_ids": []},
+            "visible_memory_update": {
+                "known_facts": [],
+                "checked_scopes": ["directory_context"],
+                "candidate_media_ids": [],
+                "rejected_scopes": [],
+            },
+        }
+
+    async def embed_text(self, **_kwargs):
+        raise RuntimeError("no embedding in unit test")
+
+
+class DirectAnswerThenSelectReverseOllama:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def generate_text_json(self, **kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            return {
+                "response_mode": "answer",
+                "visible_response": {
+                    "text": "根据目录信息可以直接回答。",
+                    "answer_type": "summary",
+                    "confidence": "high",
+                    "checked_scope_summary": "只看了目录信息。",
+                    "limitations": "没有读取媒体候选。",
+                },
+                "media": {"selected_media_ids": []},
+                "visible_memory_update": {
+                    "known_facts": [],
+                    "checked_scopes": ["directory_context"],
+                    "candidate_media_ids": [],
+                    "rejected_scopes": [],
+                },
+            }
+        prompt = kwargs.get("prompt") or ""
+        ids: list[str] = []
+        for media_id in re.findall(r'"media_id":\s*"([^"]+)"', prompt):
+            if media_id not in ids:
+                ids.append(media_id)
+        selected = list(reversed(ids[:2]))
+        return {
+            "response_mode": "answer",
+            "visible_response": {
+                "text": "我从候选里挑了两个更适合的媒体。",
+                "answer_type": "media_selection",
+                "confidence": "high",
+                "checked_scope_summary": "检查了检索候选。",
+                "limitations": "只基于已有摘要。",
+            },
+            "media": {"selected_media_ids": selected},
+            "visible_memory_update": {
+                "known_facts": ["已按候选摘要挑选媒体"],
+                "checked_scopes": ["search_descriptions candidates"],
+                "candidate_media_ids": ids,
+                "rejected_scopes": [],
+            },
+        }
+
+    async def embed_text(self, **_kwargs):
+        raise RuntimeError("no embedding in unit test")
+
+
 class LoopingOllama:
     async def generate_text_json(self, **_kwargs):
         return {
@@ -419,6 +549,73 @@ def test_media_library_agent_reads_page_then_answers_with_final_json() -> None:
     assert "media_grid" in block_types
 
 
+def test_media_library_agent_keeps_media_cards_when_model_labels_selection_as_non_media_type() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
+    Base.metadata.create_all(engine)
+    SessionLocal = sessionmaker(bind=engine, future=True)
+
+    with SessionLocal() as db:
+        image, _video = _seed_media(db)
+        request = ChatStreamRequest(
+            message="找一张电脑桌面照片",
+            directory_path="F:/Photos/Current",
+            context=ChatAgentContext(
+                runtime_context=ChatRuntimeContext(today="2026-06-28"),
+                ui_context=ChatUiContext(current_directory_path="F:/Photos/Current"),
+            ),
+        )
+        events = asyncio.run(_collect_events(db, request, MisclassifiedMediaSelectionOllama()))
+
+    final = [event for event in events if event.event == "final_answer"][-1].data["final_answer"]
+    assert final["answer_type"] == "media_selection"
+    assert final["selected_media_ids"] == [str(image.id)]
+    assistant = [event for event in events if event.event == "assistant_message"][-1]
+    block_types = [block["type"] for block in assistant.data["blocks"]]
+    assert "media_grid" in block_types
+
+
+def test_media_library_agent_forces_search_but_does_not_vector_fill_cards() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
+    Base.metadata.create_all(engine)
+    SessionLocal = sessionmaker(bind=engine, future=True)
+
+    with SessionLocal() as db:
+        _seed_media(db)
+        request = ChatStreamRequest(message="找一张电脑桌面照片", media_type="image", limit=5)
+        events = asyncio.run(_collect_events(db, request, DirectAnswerForMediaSearchOllama()))
+
+    action_events = [event for event in events if event.event == "agent_action"]
+    assert action_events[0].data["action"] == "search_descriptions"
+    assert any(event.event == "tool_result" and event.data["tool"] == "search_descriptions" for event in events)
+    final = [event for event in events if event.event == "final_answer"][-1].data["final_answer"]
+    assert final["answer_type"] == "summary"
+    assert "selected_media_ids" not in final
+    assistant = [event for event in events if event.event == "assistant_message"][-1]
+    block_types = [block["type"] for block in assistant.data["blocks"]]
+    assert "media_grid" not in block_types
+
+
+def test_media_library_agent_uses_ai_selected_count_and_order_after_search() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
+    Base.metadata.create_all(engine)
+    SessionLocal = sessionmaker(bind=engine, future=True)
+
+    with SessionLocal() as db:
+        _seed_media(db)
+        request = ChatStreamRequest(message="找几个电脑桌面媒体", media_type="any", limit=5)
+        events = asyncio.run(_collect_events(db, request, DirectAnswerThenSelectReverseOllama()))
+
+    tool_result = [event for event in events if event.event == "tool_result" and event.data["tool"] == "search_descriptions"][-1]
+    candidate_ids = [item["media_id"] for item in tool_result.data["result"]["items"]]
+    expected = list(reversed(candidate_ids[:2]))
+    final = [event for event in events if event.event == "final_answer"][-1].data["final_answer"]
+    assert final["answer_type"] == "media_selection"
+    assert final["selected_media_ids"] == expected
+    assistant = [event for event in events if event.event == "assistant_message"][-1]
+    media_grid = [block for block in assistant.data["blocks"] if block["type"] == "media_grid"][0]
+    assert [item["media_id"] for item in media_grid["items"]] == expected
+
+
 def test_media_library_agent_directory_answer_uses_visible_response_without_media_cards() -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
     Base.metadata.create_all(engine)
@@ -492,7 +689,7 @@ def test_media_library_agent_uses_configured_max_turns(monkeypatch) -> None:
     assert final_tool.data["tool"] == "fallback_no_media_selection"
 
 
-def test_media_library_agent_fallback_on_invalid_json_uses_keyword_search() -> None:
+def test_media_library_agent_fallback_on_invalid_json_does_not_emit_vector_cards() -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
     Base.metadata.create_all(engine)
     SessionLocal = sessionmaker(bind=engine, future=True)
@@ -505,10 +702,10 @@ def test_media_library_agent_fallback_on_invalid_json_uses_keyword_search() -> N
     assert action.data["action"] == "fallback"
     final = [event for event in events if event.event == "final_answer"][-1].data["final_answer"]
     assert final["confidence"] == "low"
-    assert final["selected_media_ids"] == [str(image.id)]
+    assert "selected_media_ids" not in final
     assistant = [event for event in events if event.event == "assistant_message"][-1]
     block_types = [block["type"] for block in assistant.data["blocks"]]
-    assert "media_grid" in block_types
+    assert "media_grid" not in block_types
 
 
 def test_context_pack_falls_back_when_frontend_sends_no_context() -> None:
