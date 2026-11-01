@@ -12,6 +12,7 @@ DEFAULTS = {
     "embedding_url": "http://localhost:11434", "embedding_model": "",
     "embedding_key": "", "codex_command": "codex", "video_budget": 1800,
     "image_concurrency": 1,
+    "preview_image_concurrency": 2, "preview_video_concurrency": 1,
     "cpu_decode_concurrency": 4, "intel_decode_concurrency": 4,
     "nvidia_decode_concurrency": 4, "ai_request_concurrency": 4,
     "embedding_request_concurrency": 1, "max_cpu_cores": 0,
@@ -37,6 +38,7 @@ CREATE TABLE IF NOT EXISTS media (
  size INTEGER, mtime_ns INTEGER, hash TEXT, availability TEXT NOT NULL DEFAULT 'online',
  preview_state TEXT NOT NULL DEFAULT 'pending', analysis_state TEXT NOT NULL DEFAULT 'pending',
  vector_state TEXT NOT NULL DEFAULT 'pending', preview TEXT, metadata TEXT NOT NULL DEFAULT '{}',
+ thumbnail TEXT, thumbnail_state TEXT NOT NULL DEFAULT 'pending',
  sort_time REAL NOT NULL DEFAULT 0, note TEXT NOT NULL DEFAULT '',
  description TEXT NOT NULL DEFAULT '', revision INTEGER NOT NULL DEFAULT 0,
  identity_pending INTEGER NOT NULL DEFAULT 0,
@@ -45,6 +47,7 @@ CREATE INDEX IF NOT EXISTS media_sort ON media(availability, sort_time DESC, id)
 CREATE INDEX IF NOT EXISTS media_root ON media(root_id, availability, sort_time DESC);
 CREATE INDEX IF NOT EXISTS media_hash ON media(hash);
 CREATE INDEX IF NOT EXISTS media_fsid ON media(fsid);
+CREATE INDEX IF NOT EXISTS media_size_hashed ON media(size) WHERE hash IS NOT NULL;
 CREATE TABLE IF NOT EXISTS vectors (
  media_id TEXT NOT NULL REFERENCES media(id) ON DELETE CASCADE, profile TEXT NOT NULL,
  revision INTEGER NOT NULL, dim INTEGER NOT NULL, data BLOB NOT NULL,
@@ -121,6 +124,16 @@ class Database:
             media_columns = {row['name'] for row in db.execute('PRAGMA table_info(media)')}
             if 'identity_pending' not in media_columns:
                 db.execute('ALTER TABLE media ADD COLUMN identity_pending INTEGER NOT NULL DEFAULT 0')
+            if 'thumbnail' not in media_columns:
+                db.execute('ALTER TABLE media ADD COLUMN thumbnail TEXT')
+            if 'thumbnail_state' not in media_columns:
+                db.execute("ALTER TABLE media ADD COLUMN thumbnail_state TEXT NOT NULL DEFAULT 'pending'")
+                # Existing standard previews are immediately usable in the grid.
+                db.execute("UPDATE media SET thumbnail=preview,thumbnail_state='ready' WHERE preview_state='ready' AND preview IS NOT NULL")
+            db.execute("CREATE INDEX IF NOT EXISTS media_preview_queue ON media(kind,updated,id) WHERE availability='online' AND preview_state='pending'")
+            db.execute("CREATE INDEX IF NOT EXISTS media_thumbnail_queue ON media(kind,updated,id) WHERE availability='online' AND thumbnail_state='pending' AND preview_state='pending'")
+            db.execute("CREATE INDEX IF NOT EXISTS media_hash_queue ON media(updated,id) WHERE availability='online' AND hash IS NULL AND preview_state<>'pending'")
+            db.execute("CREATE INDEX IF NOT EXISTS media_pending_identity ON media(size) WHERE availability='online' AND identity_pending=1 AND hash IS NULL")
             frame_columns = {row['name'] for row in db.execute('PRAGMA table_info(video_frames)')}
             if 'source_hash' not in frame_columns:
                 db.execute('ALTER TABLE video_frames ADD COLUMN source_hash TEXT')

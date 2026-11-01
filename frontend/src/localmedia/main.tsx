@@ -31,7 +31,7 @@ import {
 } from "lucide-react";
 import "./style.css";
 import { useGamepad } from "./useGamepad";
-import { localDateBoundary, settingsPatch } from "./uiLogic";
+import { localDateBoundary, settingsPatch, previewUrl } from "./uiLogic";
 
 type Media = {
   title?: string;
@@ -40,6 +40,8 @@ type Media = {
   kind: string;
   sort_time: number;
   preview_state: string;
+  thumbnail_state?: string;
+  preview_version?: string;
   analysis_state: string;
   analysis_error?: string | null;
   vector_state: string;
@@ -103,6 +105,7 @@ const labels: Record<string, string> = {
   unknown: "额度状态未知",
   protected: "额度保护已触发",
   disabled: "已禁用",
+  unavailable: "等待标准预览",
 };
 const label = (s: string) => labels[s] || s;
 async function api<T = any>(
@@ -171,6 +174,19 @@ function App() {
   const [detail, setDetail] = useState<Media | null>(null),
     [viewer, setViewer] = useState(false),
     [zoom, setZoom] = useState(1);
+  const [imageFallback, setImageFallback] = useState(false);
+  const previewClient = useRef(`${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  useEffect(() => { setImageFallback(false); }, [detail?.id]);
+  useEffect(() => {
+    if (!detail || detail.preview_state !== 'pending') return;
+    let active = true;
+    const timer = setInterval(() => {
+      void api<Media>('/media/' + detail.id).then(row => {
+        if (active) setDetail(previous => previous?.id === row.id ? row : previous);
+      }).catch(() => {});
+    }, 1500);
+    return () => { active = false; clearInterval(timer); };
+  }, [detail?.id, detail?.preview_state]);
   const [settings, setSettings] = useState(false),
     [sidebarOpen, setSidebarOpen] = useState(false),
     [panel, setPanel] = useState(false),
@@ -215,6 +231,9 @@ function App() {
     { state: string; count: number }[]
   >([]);
   const [syncRoots, setSyncRoots] = useState<Root[]>([]);
+  const [thumbnailCounts, setThumbnailCounts] = useState<{state:string;count:number}[]>([]);
+  const [previewWorkers, setPreviewWorkers] = useState({image:0,video:0});
+  const importing = syncRoots.some(r => r.state === 'scanning' || r.state === 'pending') || previewCounts.some(c => c.state === 'pending' && c.count > 0);
   const [notice, setNotice] = useState(""),
     [error, setError] = useState(""),
     [version, setVersion] = useState(0),
@@ -261,6 +280,8 @@ function App() {
     setQuota(ts.quota.state);
     setVectors(ts.vectors);
     setPreviewCounts(ts.previews || []);
+    setThumbnailCounts(ts.thumbnails || []);
+    setPreviewWorkers(ts.preview_workers || {image:0,video:0});
     setSyncRoots(ts.sync || []);
   };
   useEffect(() => {
@@ -357,6 +378,21 @@ function App() {
     return () => window.removeEventListener("keydown", close);
   }, [sidebarOpen]);
   const visible = virtual.getVirtualItems();
+  const viewportIds = visible
+    .filter(row => row.end > (grid.current?.scrollTop || 0) && row.start < (grid.current?.scrollTop || 0) + (grid.current?.clientHeight || 0))
+    .flatMap(row => Array.from({length:columns}, (_, col) => {
+      const index = row.index * columns + col;
+      return pages[Math.floor(index / 100)]?.[index % 100]?.id;
+    })).filter((id): id is string => !!id).slice(0, 160);
+  const viewportKey = viewportIds.join(',');
+  useEffect(() => {
+    const send = () => void api('/previews/priority', {
+      client:previewClient.current, ids:viewer ? [] : viewportIds, detail_id:detail?.id || null,
+    }).catch(() => {});
+    const delay = setTimeout(send, 120);
+    const heartbeat = setInterval(send, 3000);
+    return () => { clearTimeout(delay); clearInterval(heartbeat); };
+  }, [viewportKey, detail?.id, viewer]);
   useEffect(() => {
     if (semantic && search && !missing) return;
     for (const row of visible) {
@@ -375,9 +411,9 @@ function App() {
     const timer = setInterval(() => {
       const page = Math.floor(((visible[0]?.index || 0) * columns) / 100);
       void load(page, generation.current);
-    }, 3000);
+    }, importing ? 1000 : 3000);
     return () => clearInterval(timer);
-  }, [filterKey, semantic, visible[0]?.index, columns, viewer]);
+  }, [filterKey, semantic, visible[0]?.index, columns, viewer, importing]);
   useEffect(() => {
     const count = activeRoots.reduce((n, r) => n + r.count, 0);
     if (!search && count !== total && !root && !missing) refresh();
@@ -928,10 +964,10 @@ function App() {
                         onClick={() => choose(m.id, true)}
                       >
                         <div className="thumb">
-                          {m.preview_state === "ready" ? (
+                          {m.preview_state === "ready" || m.thumbnail_state === "ready" ? (
                             <img
                               loading="lazy"
-                              src={"/api/media/" + m.id + "/preview"}
+                              src={previewUrl(m, 'thumbnail')}
                               alt={m.name}
                             />
                           ) : (
@@ -1020,7 +1056,7 @@ function App() {
               }}
             >
               <img
-                src={"/api/media/" + detail.id + "/preview"}
+                src={previewUrl(detail)}
                 alt={detail.name}
               />
               <Maximize2 size={17} />
@@ -1038,6 +1074,8 @@ function App() {
                 <span>{label(detail.analysis_state)}</span>
                 <span>向量 {label(detail.vector_state)}</span>
               </div>
+              {detail.thumbnail_state === 'ready' && detail.preview_state === 'pending' &&
+                <p className="muted">快速预览已就绪，正在准备标准预览。</p>}
               {detail.analysis_error && <p className="failure-message" role="alert">最近分析失败：{detail.analysis_error}</p>}
               {detail.preview_state === "failed" && (
                 <button
@@ -1328,7 +1366,10 @@ function App() {
         <Modal title="任务中心" close={() => setPanel(false)} wide>
           <div className="run">
             <strong>目录同步与预览</strong>
+            <p>快速缩略图：{thumbnailCounts.map(c => `${label(c.state)} ${c.count}`).join(' · ')}<br />
+              当前处理：照片 {previewWorkers.image} · 视频 {previewWorkers.video}</p>
             <p>
+              标准预览：
               {previewCounts
                 .map((c) => `${label(c.state)} ${c.count}`)
                 .join(" · ")}
@@ -1483,11 +1524,9 @@ function App() {
               ) : (
                 <img
                   style={{ transform: `scale(${zoom})` }}
-                  src={"/api/media/" + detail.id + "/original"}
-                  onError={(event) => {
-                    const fallback = "/api/media/" + detail.id + "/preview";
-                    if (event.currentTarget.src !== new URL(fallback, window.location.href).href)
-                      event.currentTarget.src = fallback;
+                  src={imageFallback ? previewUrl(detail) : "/api/media/" + detail.id + "/original"}
+                  onError={() => {
+                    if (!imageFallback) setImageFallback(true);
                   }}
                   alt={detail.name}
                 />
@@ -1895,6 +1934,14 @@ function SettingsDialog({
           </section>
         </div>
         <h3 className="settings-heading">分析任务</h3>
+        <section className="settings-card">
+          <h3>导入与预览</h3>
+          <div className="settings-grid">
+            {field('preview_image_concurrency', '照片预览并发数（1–8）', 'number')}
+            {field('preview_video_concurrency', '视频预览并发数（1–4）', 'number')}
+          </div>
+          <p className="muted">先显示快速缩略图，再补充标准预览。优先处理当前可见影像与打开的详情；照片和视频独立排队。AI 分析使用标准预览，降低并发不打断已开始的处理。</p>
+        </section>
         <div className="settings-grid settings-cards">
           <section>
             <h3>资源与并发</h3>

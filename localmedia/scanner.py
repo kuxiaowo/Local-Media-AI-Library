@@ -8,7 +8,8 @@ import time
 import uuid
 from pathlib import Path
 
-from .media import IMAGES, VIDEOS, file_hash, make_preview, normalized, sort_timestamp
+from .media import IMAGES, VIDEOS, ThumbnailUnavailable, file_hash, make_preview, normalized, sort_timestamp, thumbnail_from_preview
+from .previews import PreviewScheduler
 from .tasks import pending_source_matches
 
 
@@ -24,6 +25,7 @@ class Scanner:
         self.observer = None
         self.preview_wake = threading.Event()
         self.hash_wake = threading.Event()
+        self.previews = PreviewScheduler(self)
 
     def start(self):
         self.thread = threading.Thread(target=self.loop, daemon=True, name='media-sync')
@@ -81,37 +83,7 @@ class Scanner:
             self.hash_thread.join(timeout=5)
 
     def preview_loop(self):
-        while not self.stop.is_set():
-            self.cleanup_previews()
-            self.preview_wake.clear()
-            while not self.stop.is_set():
-                self.cleanup_previews()
-                root_ids = [root['id'] for root in self.db.enabled_roots()]
-                rows = self.db.rows(
-                    "SELECT * FROM media WHERE availability='online' AND preview_state='pending' "
-                    "AND size IS NOT NULL AND mtime_ns IS NOT NULL "
-                    "AND root_id IN (" + ','.join('?' for _ in root_ids) + ") LIMIT 32",
-                    root_ids,
-                ) if root_ids else []
-                if not rows:
-                    break
-                handled = False
-                for row in rows:
-                    if self.stop.is_set():
-                        return
-                    if time.time_ns() - row['mtime_ns'] < 2_000_000_000:
-                        continue
-                    with self.preview_lock:
-                        if self.db.one('SELECT id FROM media WHERE id=?',(row['id'],)):
-                            self.preview_active.set()
-                            try:
-                                self.preview(row)
-                            finally:
-                                self.preview_active.clear()
-                            handled = True
-                if not handled:
-                    break
-            self.preview_wake.wait(10)
+        self.previews.loop()
 
     def hash_loop(self):
         """Fill content hashes after previews, outside the latency-sensitive scan."""
@@ -121,17 +93,8 @@ class Scanner:
                 root_ids = [root['id'] for root in self.db.enabled_roots()]
                 if not root_ids:
                     break
-                pending_preview = self.db.one(
-                    "SELECT 1 FROM media WHERE availability='online' AND preview_state='pending' "
-                    "AND size IS NOT NULL AND mtime_ns IS NOT NULL "
-                    "AND root_id IN (" + ','.join('?' for _ in root_ids) + ") LIMIT 1", root_ids)
-                if pending_preview:
-                    self.preview_wake.set()
-                    if self.stop.wait(.25):
-                        return
-                    continue
                 row = self.db.one(
-                    "SELECT * FROM media WHERE availability='online' AND hash IS NULL "
+                    "SELECT * FROM media INDEXED BY media_hash_queue WHERE availability='online' AND hash IS NULL AND preview_state<>'pending' "
                     "AND root_id IN (" + ','.join('?' for _ in root_ids) + ") ORDER BY updated,id LIMIT 1",
                     root_ids,
                 )
@@ -179,8 +142,8 @@ class Scanner:
         return True
 
     def hash_interrupted(self):
-        while self.preview_active.is_set() and not self.stop.is_set():
-            self.stop.wait(.05)
+        if self.preview_active.is_set():
+            self.stop.wait(.002)  # yield I/O time without starving hashes behind the whole import
         return self.stop.is_set()
 
     def drain_hashes(self):
@@ -215,9 +178,9 @@ class Scanner:
             db.execute('DELETE FROM media WHERE id=?', (new['id'],))
             db.execute(
                 "UPDATE media SET root_id=?,path=?,parent=?,name=?,fsid=?,size=?,mtime_ns=?,hash=?,"
-                "availability='online',preview_state=?,preview=?,metadata=?,sort_time=?,identity_pending=0,error=?,updated=? WHERE id=?",
+                "availability='online',preview_state=?,preview=?,thumbnail_state=?,thumbnail=?,metadata=?,sort_time=?,identity_pending=0,error=?,updated=? WHERE id=?",
                 (new['root_id'], new['path'], new['parent'], new['name'], new['fsid'], new['size'], new['mtime_ns'],
-                 digest, new['preview_state'], new['preview'], new['metadata'], new['sort_time'], new['error'],
+                 digest, new['preview_state'], new['preview'], new['thumbnail_state'], new['thumbnail'], new['metadata'], new['sort_time'], new['error'],
                  time.time(), old['id']))
             db.execute('INSERT OR REPLACE INTO preview_cleanup VALUES (?,?)', (old['id'], time.time()+1800))
 
@@ -231,10 +194,13 @@ class Scanner:
         cache = (self.db.directory / 'previews').resolve()
         for row in self.db.rows('SELECT * FROM preview_cleanup WHERE due<=?',(time.time(),)):
             try:
-                for path in cache.glob(row['media_id']+'-*.jpg'):
-                    if path.resolve().parent == cache:
-                        path.unlink(missing_ok=True)
-                self.db.execute('DELETE FROM preview_cleanup WHERE media_id=?',(row['media_id'],))
+                with self.preview_lock:
+                    current = self.db.one('SELECT preview,thumbnail FROM media WHERE id=?', (row['media_id'],))
+                    retained = {Path(value).resolve() for value in (current or {}).values() if value}
+                    for path in cache.glob(row['media_id']+'-*.jpg'):
+                        if path.resolve().parent == cache and path.resolve() not in retained:
+                            path.unlink(missing_ok=True)
+                    self.db.execute('DELETE FROM preview_cleanup WHERE media_id=?',(row['media_id'],))
             except OSError:
                 pass
 
@@ -244,42 +210,28 @@ class Scanner:
                 return
             roots = self.db.enabled_roots()
             inventories = []
-            def discover(root, path):
-                key = normalized(path)
-                current = self.db.one('SELECT * FROM media WHERE path=?', (key,))
-                stat = path.stat()
-                if not current:
-                    fsid = f'{stat.st_dev}:{stat.st_ino}' if stat.st_ino else None
-                    moved = self.db.one(
-                        "SELECT * FROM media WHERE fsid=? AND path<>?", (fsid, key)) if fsid else None
-                    if moved and Path(moved['path']).exists():
-                        moved = None
-                    if moved:
-                        # Keep the old fingerprint until visit() has compared it
-                        # with the file at its new path, including edits before a move.
-                        self.db.execute(
-                            "UPDATE media SET root_id=?,path=?,parent=?,name=?,availability='online',updated=? WHERE id=?",
-                            (root['id'], key, normalized(path.parent), path.name,
-                             time.time(), moved['id']))
-                        current = self.db.one('SELECT * FROM media WHERE id=?', (moved['id'],))
-                    else:
-                        same_size = self.db.rows(
-                            'SELECT path FROM media WHERE size=? AND hash IS NOT NULL LIMIT 32', (stat.st_size,))
-                        identity_pending = int(any(not Path(row['path']).exists() for row in same_size))
-                        self.db.execute('INSERT INTO media(id,root_id,path,parent,name,kind,fsid,sort_time,size,mtime_ns,identity_pending,updated) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
-                            (str(uuid.uuid4()),root['id'],key,normalized(path.parent),path.name,
-                             'image' if path.suffix.lower() in IMAGES else 'video',fsid,stat.st_mtime,
-                             stat.st_size,stat.st_mtime_ns,identity_pending,time.time()))
-                        current = self.db.one('SELECT * FROM media WHERE path=?', (key,))
-                self.visit(root['id'], path, current, stat)
-                self.preview_wake.set()
-                self.hash_wake.set()
-            # Inventory every accessible root before matching moves. A one-to-many
-            # hash match must not depend on directory enumeration order.
-            for root in roots:
-                inventory = self.inventory(root, lambda path: discover(root, path))
-                if inventory is not None:
-                    inventories.append((root, inventory))
+            # One connection and short transactions, rather than reconnecting and
+            # committing for each lookup/update. Publish the first item promptly.
+            with self.db.connect() as conn:
+                pending = 0
+                last_flush = time.monotonic()
+                first = True
+                def discover(root, path):
+                    nonlocal pending, last_flush, first
+                    self.discover(conn, root, path)
+                    pending += 1
+                    if first or pending >= 64 or time.monotonic() - last_flush >= .1:
+                        conn.commit()
+                        self.preview_wake.set()
+                        self.hash_wake.set()
+                        pending, last_flush, first = 0, time.monotonic(), False
+                for root in roots:
+                    inventory = self.inventory(root, lambda path: discover(root, path), conn=conn)
+                    conn.commit()
+                    if inventory is not None:
+                        inventories.append((root, inventory))
+                    self.preview_wake.set()
+                    self.hash_wake.set()
             for root, inventory in inventories:
                 if self.stop.is_set() or self.interrupt_scan.is_set():
                     return
@@ -288,8 +240,42 @@ class Scanner:
             self.preview_wake.set()
             self.hash_wake.set()
 
-    def inventory(self, root, on_discover=None):
-        self.db.execute("UPDATE roots SET state='scanning',error=NULL WHERE id=?", (root['id'],))
+    def discover(self, conn, root, path):
+        key = normalized(path)
+        current = conn.execute('SELECT * FROM media WHERE path=?', (key,)).fetchone()
+        stat = path.stat()
+        if not current:
+            fsid = f'{stat.st_dev}:{stat.st_ino}' if stat.st_ino else None
+            moved = conn.execute(
+                "SELECT * FROM media WHERE fsid=? AND path<>?", (fsid, key)).fetchone() if fsid else None
+            if moved and Path(moved['path']).exists():
+                moved = None
+            if moved:
+                # Keep the old fingerprint until visit() has compared it
+                # with the file at its new path, including edits before a move.
+                conn.execute(
+                    "UPDATE media SET root_id=?,path=?,parent=?,name=?,availability='online',updated=? WHERE id=?",
+                    (root['id'], key, normalized(path.parent), path.name,
+                     time.time(), moved['id']))
+                current = conn.execute('SELECT * FROM media WHERE id=?', (moved['id'],)).fetchone()
+            else:
+                same_size = conn.execute(
+                    'SELECT path FROM media WHERE size=? AND hash IS NOT NULL LIMIT 32', (stat.st_size,)).fetchall()
+                identity_pending = int(any(not Path(row['path']).exists() for row in same_size))
+                conn.execute('INSERT INTO media(id,root_id,path,parent,name,kind,fsid,sort_time,size,mtime_ns,identity_pending,updated) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+                    (str(uuid.uuid4()),root['id'],key,normalized(path.parent),path.name,
+                     'image' if path.suffix.lower() in IMAGES else 'video',fsid,stat.st_mtime,
+                     stat.st_size,stat.st_mtime_ns,identity_pending,time.time()))
+                if time.time() - stat.st_mtime < 2:
+                    self.wake.set()
+                return
+        self.visit(root['id'], path, current, stat, conn=conn)
+
+    def inventory(self, root, on_discover=None, conn=None):
+        writer = conn or self.db
+        writer.execute("UPDATE roots SET state='scanning',error=NULL WHERE id=?", (root['id'],))
+        if conn:
+            conn.commit()
         paths = []
         # Nested roots keep their own background and ownership. The ancestor
         # scans only the remaining tree, so each file is inventoried once.
@@ -316,7 +302,7 @@ class Scanner:
                         on_discover(path)
             return paths
         except OSError as exc:
-            self.db.execute("UPDATE roots SET state='offline',error=? WHERE id=?", (str(exc), root['id']))
+            writer.execute("UPDATE roots SET state='offline',error=? WHERE id=?", (str(exc), root['id']))
             return None
 
     def scan_root(self, root):
@@ -348,46 +334,101 @@ class Scanner:
         except OSError as exc:
             self.db.execute("UPDATE roots SET state='offline',error=? WHERE id=?", (str(exc), root['id']))
 
-    def visit(self, root_id, path, current=None, stat=None):
+    def visit(self, root_id, path, current=None, stat=None, conn=None):
+        if conn is None:
+            with self.db.connect() as conn:
+                return self.visit(root_id, path, current, stat, conn=conn)
         key = normalized(path)
         stat = stat or path.stat()
-        current = current or self.db.one('SELECT * FROM media WHERE path=?', (key,))
+        current = current or conn.execute('SELECT * FROM media WHERE path=?', (key,)).fetchone()
         fsid = f'{stat.st_dev}:{stat.st_ino}' if stat.st_ino else None
         # Newly written files are revisited; do not decode an in-progress copy.
         if time.time() - stat.st_mtime < 2:
             self.wake.set()
             return
         if current and (current['size'], current['mtime_ns']) == (stat.st_size, stat.st_mtime_ns):
-            self.db.execute("UPDATE media SET availability='online',root_id=?,fsid=?,size=?,mtime_ns=? WHERE id=?", (root_id, fsid, stat.st_size, stat.st_mtime_ns, current['id']))
+            if (current['availability'], current['root_id'], current['fsid']) != ('online', root_id, fsid):
+                conn.execute("UPDATE media SET availability='online',root_id=?,fsid=? WHERE id=?", (root_id, fsid, current['id']))
             return
         media_id = current['id'] if current else str(uuid.uuid4())
-        with self.db.connect() as db:
-            if not current:
-                db.execute('INSERT INTO media(id,root_id,path,parent,name,kind,sort_time,updated) VALUES (?,?,?,?,?,?,?,?)',
-                           (media_id, root_id, key, normalized(path.parent), path.name,
-                            'image' if path.suffix.lower() in IMAGES else 'video', stat.st_mtime, time.time()))
-            changed = bool(current)
-            db.execute("UPDATE media SET root_id=?,path=?,parent=?,name=?,fsid=?,size=?,mtime_ns=?,hash=NULL,availability='online',updated=? WHERE id=?",
-                       (root_id, key, normalized(path.parent), path.name, fsid, stat.st_size, stat.st_mtime_ns, time.time(), media_id))
-            if changed:
-                db.execute("UPDATE media SET preview_state='pending',analysis_state='stale',vector_state='stale',revision=revision+1 WHERE id=?", (media_id,))
-                db.execute('DELETE FROM vectors WHERE media_id=?', (media_id,))
-                db.execute('DELETE FROM vector_jobs WHERE media_id=?', (media_id,))
+        db = conn
+        if not current:
+            db.execute('INSERT INTO media(id,root_id,path,parent,name,kind,sort_time,updated) VALUES (?,?,?,?,?,?,?,?)',
+                       (media_id, root_id, key, normalized(path.parent), path.name,
+                        'image' if path.suffix.lower() in IMAGES else 'video', stat.st_mtime, time.time()))
+        changed = bool(current)
+        db.execute("UPDATE media SET root_id=?,path=?,parent=?,name=?,fsid=?,size=?,mtime_ns=?,hash=NULL,availability='online',updated=? WHERE id=?",
+                   (root_id, key, normalized(path.parent), path.name, fsid, stat.st_size, stat.st_mtime_ns, time.time(), media_id))
+        if changed:
+            db.execute("UPDATE media SET preview_state='pending',preview=NULL,thumbnail_state='pending',thumbnail=NULL,analysis_state='stale',vector_state='stale',revision=revision+1 WHERE id=?", (media_id,))
+            db.execute('DELETE FROM vectors WHERE media_id=?', (media_id,))
+            db.execute('DELETE FROM vector_jobs WHERE media_id=?', (media_id,))
 
-    def preview(self, row):
+    def preview(self, row, tier='standard'):
         fingerprint = f"{row['size'] or 0:x}-{row['mtime_ns'] or 0:x}"
-        destination = self.db.directory / 'previews' / (row['id'] + '-' + fingerprint + '.jpg')
+        cache = self.db.directory / 'previews'
+        cache.mkdir(parents=True, exist_ok=True)
+        prefix = row['id'] + '-' + fingerprint
+        standard = cache / (prefix + '.jpg')
+        # A browser may still hold the quick file open on Windows. Publish the
+        # color-managed thumbnail at a different path instead of replacing it.
+        thumbnail = cache / (prefix + ('-thumb.jpg' if tier == 'thumbnail' else '-thumb-standard.jpg'))
+        temporary = cache / ('.tmp-' + prefix + '-' + uuid.uuid4().hex + '.jpg')
+        thumb_temp = temporary.with_name(temporary.stem + '-thumb.jpg')
+        quick = tier == 'thumbnail'
         try:
+            if self.stop.is_set():
+                return
             decoder = self.db.settings().get('video_decoder', 'cpu') if row['kind'] == 'video' else 'cpu'
-            meta = make_preview(row['path'], destination, row['kind'], decoder)
-            updated = self.db.execute("UPDATE media SET preview=?,preview_state='ready',metadata=?,sort_time=?,error=NULL WHERE id=? AND size=? AND mtime_ns=?",
-                            (str(destination), json.dumps(meta, ensure_ascii=False),
-                             sort_timestamp(meta, row['mtime_ns'] / 1e9), row['id'], row['size'], row['mtime_ns']))
-            if not updated:
-                destination.unlink(missing_ok=True)
+            meta = make_preview(row['path'], temporary, row['kind'], decoder,
+                                thumbnail=quick, cancelled=self.stop.is_set)
+            stat = Path(row['path']).stat()
+            if self.stop.is_set():
+                return
+            if (stat.st_size, stat.st_mtime_ns) != (row['size'], row['mtime_ns']):
+                self.wake.set()
+                return
+            if not quick:
+                thumbnail_from_preview(temporary, thumb_temp)
+            # Only publication holds the shared lock. Slow rendering must never
+            # serialize the image/video lanes or block directory removal.
+            with self.preview_lock:
+                current = self.db.one('SELECT id FROM media WHERE id=? AND size=? AND mtime_ns=?',
+                                      (row['id'], row['size'], row['mtime_ns']))
+                if not current:
+                    return
+                os.replace(temporary, thumbnail if quick else standard)
+                if not quick:
+                    os.replace(thumb_temp, thumbnail)
+                with self.db.connect() as conn:
+                    updated = conn.execute("UPDATE media SET thumbnail=?,thumbnail_state='ready',metadata=?,sort_time=? WHERE id=? AND size=? AND mtime_ns=?",
+                        (str(thumbnail), json.dumps(meta, ensure_ascii=False), sort_timestamp(meta, row['mtime_ns'] / 1e9),
+                         row['id'], row['size'], row['mtime_ns'])).rowcount
+                    if not quick and updated:
+                        conn.execute("UPDATE media SET preview=?,preview_state='ready',error=NULL WHERE id=?",
+                                     (str(standard), row['id']))
+                if not updated:
+                    thumbnail.unlink(missing_ok=True)
+                    if not quick:
+                        standard.unlink(missing_ok=True)
+        except InterruptedError:
+            pass  # work remains pending and resumes after restart
+        except ThumbnailUnavailable:
+            self.db.execute("UPDATE media SET thumbnail_state='unavailable' WHERE id=? AND size=? AND mtime_ns=?",
+                            (row['id'], row['size'], row['mtime_ns']))
         except Exception as exc:
-            reason = str(exc) if isinstance(exc, RuntimeError) else type(exc).__name__
-            if isinstance(exc, subprocess.CalledProcessError):
-                reason = 'FFmpeg 无法解码，文件可能损坏或编码不受支持'
-            self.db.execute("UPDATE media SET preview_state='failed',error=? WHERE id=? AND size=? AND mtime_ns=?",
-                            ('预览失败：' + reason, row['id'], row['size'], row['mtime_ns']))
+            if quick:
+                # A failed fast path still gets one normal decoding attempt.
+                self.db.execute("UPDATE media SET thumbnail_state='unavailable' WHERE id=? AND size=? AND mtime_ns=?",
+                                (row['id'], row['size'], row['mtime_ns']))
+            else:
+                reason = str(exc) if isinstance(exc, RuntimeError) else type(exc).__name__
+                if isinstance(exc, subprocess.CalledProcessError):
+                    reason = 'FFmpeg 无法解码，文件可能损坏或编码不受支持'
+                self.db.execute("UPDATE media SET preview_state='failed',error=? WHERE id=? AND size=? AND mtime_ns=?",
+                                ('预览失败：' + reason, row['id'], row['size'], row['mtime_ns']))
+        finally:
+            temporary.unlink(missing_ok=True)
+            thumb_temp.unlink(missing_ok=True)
+            self.preview_wake.set()
+            self.hash_wake.set()
