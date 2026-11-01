@@ -138,4 +138,3 @@ def _dedupe_paths(paths: list[str]) -> list[str]:
             result.append(normalized)
             seen.add(normalized)
     return result
-

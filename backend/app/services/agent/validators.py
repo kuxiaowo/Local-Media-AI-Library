@@ -116,4 +116,3 @@ def _parse_evidence_datetime(value: object) -> datetime | None:
         return datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError:
         return None
-

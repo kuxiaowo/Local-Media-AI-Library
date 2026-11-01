@@ -164,4 +164,3 @@ def _clip(text: str | None, max_chars: int) -> str:
     if len(compact) <= max_chars:
         return compact
     return compact[: max_chars - 3].rstrip() + "..."
-

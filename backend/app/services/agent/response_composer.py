@@ -233,4 +233,3 @@ def _public_stats(stats: dict[str, Any] | object) -> dict[str, Any]:
             continue
         result[key] = value
     return result
-

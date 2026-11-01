@@ -222,4 +222,3 @@ def _string_list(value: object) -> list[str]:
     if not isinstance(value, list):
         return []
     return [text for text in (clean_text(item) for item in value) if text]
-

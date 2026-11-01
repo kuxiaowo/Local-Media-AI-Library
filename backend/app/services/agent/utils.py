@@ -121,4 +121,3 @@ def jsonish(value: Any) -> Any:
     if isinstance(value, (str, int, float, bool, list, dict)):
         return value
     return str(value)
-

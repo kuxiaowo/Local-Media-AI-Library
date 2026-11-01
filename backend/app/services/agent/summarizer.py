@@ -197,4 +197,3 @@ def _representative_ids(raw: dict[str, Any], candidates) -> list[str]:
 def _chunks(candidates, *, max_items: int):
     for index in range(0, len(candidates), max_items):
         yield candidates[index : index + max_items]
-

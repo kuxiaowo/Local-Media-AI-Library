@@ -374,4 +374,3 @@ def _dedupe(values) -> list[str]:
 
 def _matches(text: str, pattern: str) -> bool:
     return re.search(pattern, text, flags=re.IGNORECASE) is not None
-
