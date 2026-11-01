@@ -224,9 +224,14 @@ export interface OllamaModels {
 }
 
 export interface RuntimeSettings {
+  ai_search_provider: 'ollama' | 'deepseek';
   default_embedding_model: string;
   default_ai_search_model: string;
   ai_search_max_turns: number;
+  deepseek_base_url: string;
+  deepseek_model: string;
+  deepseek_api_key: string;
+  deepseek_api_key_set: boolean;
   max_image_long_edge: number;
   scan_worker_concurrency: number;
   metadata_worker_concurrency: number;

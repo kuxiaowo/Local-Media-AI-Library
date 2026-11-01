@@ -7,10 +7,15 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload
 
 from app.config import get_settings
-from app.models.db_models import Job, MediaFile
+from app.core.path_utils import normalize_path, path_has_prefix
+from app.models.db_models import DirectoryRule, Job, MediaFile
 
 
 def cleanup_stale_media(db: Session, job: Job | None = None) -> dict[str, int]:
+    recorded_roots = [
+        normalize_path(path)
+        for path in db.scalars(select(DirectoryRule.normalized_path)).all()
+    ]
     media_files = list(
         db.scalars(select(MediaFile).options(joinedload(MediaFile.folder_rule))).all()
     )
@@ -23,7 +28,7 @@ def cleanup_stale_media(db: Session, job: Job | None = None) -> dict[str, int]:
         db.flush()
 
     for index, media in enumerate(media_files, start=1):
-        if _is_stale(media):
+        if _is_stale(media, recorded_roots):
             _delete_thumbnail_cache(media.thumbnail_path)
             _delete_video_frame_cache(str(media.id))
             db.delete(media)
@@ -41,8 +46,11 @@ def cleanup_stale_media(db: Session, job: Job | None = None) -> dict[str, int]:
     return {"checked": total, "deleted": deleted}
 
 
-def _is_stale(media: MediaFile) -> bool:
+def _is_stale(media: MediaFile, recorded_roots: list[str]) -> bool:
     if not Path(media.path).exists():
+        return True
+
+    if not _is_under_recorded_root(media.normalized_path, recorded_roots):
         return True
 
     if media.folder_rule is not None and not Path(media.folder_rule.path).exists():
@@ -52,6 +60,10 @@ def _is_stale(media: MediaFile) -> bool:
         return True
 
     return False
+
+
+def _is_under_recorded_root(path: str, recorded_roots: list[str]) -> bool:
+    return any(path_has_prefix(path, root) for root in recorded_roots)
 
 
 def _delete_thumbnail_cache(thumbnail_path: str | None) -> None:

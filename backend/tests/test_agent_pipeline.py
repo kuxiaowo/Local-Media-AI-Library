@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import re
 import uuid
+from dataclasses import replace
 from datetime import datetime
 from types import SimpleNamespace
 
@@ -10,12 +11,21 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
-from app.models.db_models import DirectoryRule, MediaAiSummary, MediaFile, VideoSegmentSummary
+from app.models.db_models import (
+    DirectoryRule,
+    EmbeddingProfile,
+    MediaAiSummary,
+    MediaEmbedding,
+    MediaFile,
+    SearchConversation,
+    SearchMessage,
+    VideoSegmentSummary,
+)
 from app.models.schemas import ChatAgentContext, ChatRuntimeContext, ChatStreamRequest, ChatUiContext
 from app.services.agent.context_builder import build_context_pack
 from app.services.agent.evidence_builder import build_evidence
 from app.services.agent import media_library_agent
-from app.services.agent.media_library_agent import _list_media_descriptions
+from app.services.agent.media_library_agent import _list_directories, _list_media_descriptions
 from app.services.agent.planner import fallback_plan, normalize_plan
 from app.services.agent.response_composer import compose_response_blocks
 from app.services.agent.scope_resolver import resolve_scope
@@ -221,6 +231,45 @@ class DirectAnswerThenSelectReverseOllama:
 
     async def embed_text(self, **_kwargs):
         raise RuntimeError("no embedding in unit test")
+
+
+class TrackingEmbeddingOllama(DirectAnswerThenSelectReverseOllama):
+    def __init__(self) -> None:
+        super().__init__()
+        self.embed_calls = 0
+
+    async def embed_text(self, **_kwargs):
+        self.embed_calls += 1
+        return [1.0, 0.0]
+
+
+class DirectAnswerFromHistoryOllama:
+    def __init__(self, media_id: str) -> None:
+        self.media_id = media_id
+        self.prompt = ""
+
+    async def generate_text_json(self, **kwargs):
+        self.prompt = kwargs.get("prompt") or ""
+        return {
+            "response_mode": "answer",
+            "visible_response": {
+                "text": "Use the same visible media card.",
+                "answer_type": "media_selection",
+                "confidence": "high",
+                "checked_scope_summary": "Checked the visible media from the previous turn.",
+                "limitations": "Based on existing summaries only.",
+            },
+            "media": {"selected_media_ids": [self.media_id]},
+            "visible_memory_update": {
+                "known_facts": [],
+                "checked_scopes": ["previous_visible_media"],
+                "candidate_media_ids": [self.media_id],
+                "rejected_scopes": [],
+            },
+        }
+
+    async def embed_text(self, **_kwargs):
+        raise AssertionError("history card reuse should not run embedding")
 
 
 class LoopingOllama:
@@ -483,7 +532,7 @@ def test_list_media_descriptions_filters_pages_and_caps_page_size() -> None:
     SessionLocal = sessionmaker(bind=engine, future=True)
 
     with SessionLocal() as db:
-        _seed_media(db)
+        _seed_many_images(db, 120)
         result = _list_media_descriptions(
             db,
             ChatStreamRequest(message="找照片"),
@@ -491,17 +540,44 @@ def test_list_media_descriptions_filters_pages_and_caps_page_size() -> None:
                 "directory_path": "F:/Photos/Current",
                 "media_type": "image",
                 "page": 1,
-                "page_size": 99,
+                "page_size": 999,
                 "sort": "captured_desc",
             },
         )
 
     payload = result["result"]
-    assert payload["page_size"] == 50
-    assert payload["total"] == 1
+    assert payload["page_size"] == 100
+    assert payload["total"] == 120
+    assert len(payload["items"]) == 100
+    assert payload["has_next"] is True
     assert payload["items"][0]["media_type"] == "image"
-    assert payload["items"][0]["searchable_text"] == "电脑 桌面 屏幕 键盘 清晰"
+    assert payload["items"][0]["searchable_text"].startswith("电脑 桌面")
     assert result["candidate_media"][0]["media_id"] == payload["items"][0]["media_id"]
+
+
+def test_list_directories_defaults_and_caps_page_size_at_200() -> None:
+    context = replace(
+        _context_pack(),
+        directory_tree=[
+            {
+                "path": f"f:/photos/current/{index:03d}",
+                "name": f"{index:03d}",
+                "parent_path": "f:/photos/current",
+                "depth": 3,
+                "media_count": index,
+            }
+            for index in range(250)
+        ],
+    )
+
+    default_result = _list_directories(context, {})
+    capped_result = _list_directories(context, {"page_size": 999})
+
+    assert default_result["result"]["page_size"] == 200
+    assert len(default_result["result"]["items"]) == 200
+    assert default_result["result"]["total"] == 250
+    assert default_result["result"]["has_next"] is True
+    assert capped_result["result"]["page_size"] == 200
 
 
 def test_list_media_descriptions_infers_explicit_summer_date_range() -> None:
@@ -614,6 +690,111 @@ def test_media_library_agent_uses_ai_selected_count_and_order_after_search() -> 
     assistant = [event for event in events if event.event == "assistant_message"][-1]
     media_grid = [block for block in assistant.data["blocks"] if block["type"] == "media_grid"][0]
     assert [item["media_id"] for item in media_grid["items"]] == expected
+
+
+def test_media_library_agent_forces_fresh_search_for_more_media_requests() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
+    Base.metadata.create_all(engine)
+    SessionLocal = sessionmaker(bind=engine, future=True)
+
+    with SessionLocal() as db:
+        _seed_media(db)
+        request = ChatStreamRequest(message="继续找更多照片", media_type="image", limit=5)
+        events = asyncio.run(_collect_events(db, request, DirectAnswerThenSelectReverseOllama()))
+
+    action_events = [event for event in events if event.event == "agent_action"]
+    assert [event.data["action"] for event in action_events[:2]] == ["search_descriptions", "answer_now"]
+    search_action = action_events[0]
+    assert search_action.data["arguments"]["limit"] == 100
+    assert any(event.event == "tool_result" and event.data["tool"] == "search_descriptions" for event in events)
+    final = [event for event in events if event.event == "final_answer"][-1].data["final_answer"]
+    assert final["answer_type"] == "media_selection"
+    assert final["selected_media_ids"]
+
+
+def test_media_library_agent_search_does_not_call_embedding_with_existing_vectors() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
+    Base.metadata.create_all(engine)
+    SessionLocal = sessionmaker(bind=engine, future=True)
+
+    with SessionLocal() as db:
+        image, video = _seed_media(db)
+        model_name = media_library_agent.get_settings().default_embedding_model.strip() or "nomic-embed-text"
+        profile = EmbeddingProfile(model_name=model_name, dimension=2)
+        db.add(profile)
+        db.flush()
+        db.add_all(
+            [
+                MediaEmbedding(media_id=image.id, profile_id=profile.id, embedding=[1.0, 0.0], embedded_text="image"),
+                MediaEmbedding(media_id=video.id, profile_id=profile.id, embedding=[0.0, 1.0], embedded_text="video"),
+            ]
+        )
+        db.commit()
+
+        ollama = TrackingEmbeddingOllama()
+        events = asyncio.run(
+            _collect_events(db, ChatStreamRequest(message="找几个电脑桌面媒体", media_type="any", limit=5), ollama)
+        )
+
+    assert ollama.embed_calls == 0
+    assert any(event.event == "tool_result" and event.data["tool"] == "search_descriptions" for event in events)
+    final = [event for event in events if event.event == "final_answer"][-1].data["final_answer"]
+    assert final["answer_type"] == "media_selection"
+    assert len(final["selected_media_ids"]) == 2
+
+
+def test_media_library_agent_reuses_visible_history_cards_on_followup() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
+    Base.metadata.create_all(engine)
+    SessionLocal = sessionmaker(bind=engine, future=True)
+
+    with SessionLocal() as db:
+        image, _video = _seed_media(db)
+        conversation = SearchConversation(title="history")
+        db.add(conversation)
+        db.flush()
+        previous = SearchMessage(
+            conversation_id=conversation.id,
+            role="assistant",
+            content="Previous media selection.",
+            blocks=[
+                {"type": "text", "text": "Previous media selection."},
+                {
+                    "type": "media_grid",
+                    "items": [
+                        {
+                            "media_id": str(image.id),
+                            "path": image.path,
+                            "thumbnail_url": f"/api/media/{image.id}/thumbnail",
+                            "media_type": image.media_type,
+                            "captured_at": image.captured_at.isoformat() if image.captured_at else None,
+                            "title": "history item",
+                            "short_summary": "history item",
+                            "match_reason": "previous turn",
+                            "score": 0.5,
+                        }
+                    ],
+                },
+            ],
+            tool_events=[],
+        )
+        db.add(previous)
+        db.commit()
+
+        request = ChatStreamRequest(
+            message="show these cards again",
+            context=ChatAgentContext(ui_context=ChatUiContext(visible_media_ids=[image.id])),
+        )
+        ollama = DirectAnswerFromHistoryOllama(str(image.id))
+        events = asyncio.run(_collect_events_with_history(db, request, [previous], ollama))
+
+    assert "short_summary" in ollama.prompt
+    final = [event for event in events if event.event == "final_answer"][-1].data["final_answer"]
+    assert final["answer_type"] == "media_selection"
+    assert final["selected_media_ids"] == [str(image.id)]
+    assistant = [event for event in events if event.event == "assistant_message"][-1]
+    media_grid = [block for block in assistant.data["blocks"] if block["type"] == "media_grid"][0]
+    assert [item["media_id"] for item in media_grid["items"]] == [str(image.id)]
 
 
 def test_media_library_agent_directory_answer_uses_visible_response_without_media_cards() -> None:
@@ -757,6 +938,10 @@ async def _collect_events(db, request: ChatStreamRequest, ollama=None):
     return [event async for event in run_agent_turn_events(db, request, [], ollama or FakeOllama())]
 
 
+async def _collect_events_with_history(db, request: ChatStreamRequest, history, ollama):
+    return [event async for event in run_agent_turn_events(db, request, history, ollama)]
+
+
 def _context_pack(
     *,
     selected: list[str] | None = None,
@@ -787,6 +972,65 @@ def _context_pack(
         ),
         conversation_context=ConversationContext(last_shown_media_ids=previous or []),
     )
+
+
+def _seed_many_images(db, count: int):
+    rule = DirectoryRule(
+        path="F:/Photos",
+        normalized_path="f:/photos",
+        recursive=True,
+        vision_model="vision-model",
+        summary_model="summary-model",
+        background_context="这个目录是电脑桌面素材。",
+        video_frame_strategy="hybrid",
+        frame_interval_seconds=5,
+        max_frames_per_video=12,
+        video_frame_max_width=1280,
+        video_batch_size=6,
+        video_batch_overlap=1,
+        analysis_detail="normal",
+        enabled=True,
+    )
+    db.add(rule)
+    db.flush()
+    media_items = [
+        MediaFile(
+            path=f"F:/Photos/Current/desk-{index:03d}.jpg",
+            normalized_path=f"f:/photos/current/desk-{index:03d}.jpg",
+            root_path="f:/photos",
+            parent_dir="f:/photos/current",
+            media_type="image",
+            width=1200,
+            height=800,
+            captured_at=datetime(2026, 6, 1),
+            status="done",
+            folder_rule=rule,
+        )
+        for index in range(count)
+    ]
+    db.add_all(media_items)
+    db.flush()
+    db.add_all(
+        [
+            MediaAiSummary(
+                media_id=media.id,
+                model_used="summary",
+                title=f"电脑桌面 {index:03d}",
+                short_summary="一张清晰的电脑桌面照片",
+                detailed_summary="清晰的电脑桌面照片",
+                scene="桌面工作区",
+                objects=["电脑", "键盘"],
+                people=[],
+                actions=[],
+                text_visible=[],
+                search_keywords=["电脑桌面"],
+                searchable_text=f"电脑 桌面 屏幕 键盘 清晰 {index:03d}",
+            )
+            for index, media in enumerate(media_items)
+        ]
+    )
+    db.commit()
+    return media_items
 
 
 def _seed_media(

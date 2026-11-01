@@ -207,6 +207,8 @@ export function LibrarySettingsPage() {
     },
     onSuccess: (rule) => {
       queryClient.invalidateQueries({ queryKey: ['directory-rules'] });
+      queryClient.invalidateQueries({ queryKey: ['media-directories'] });
+      queryClient.invalidateQueries({ queryKey: ['media'] });
       setSelectedId(rule.id);
       setForm((current) => ({ ...current, path: rule.path }));
     },
@@ -223,6 +225,7 @@ export function LibrarySettingsPage() {
     onSuccess: (rule) => {
       queryClient.invalidateQueries({ queryKey: ['directory-rules'] });
       queryClient.invalidateQueries({ queryKey: ['media-directories'] });
+      queryClient.invalidateQueries({ queryKey: ['media'] });
       selectRule(rule);
     },
   });
@@ -231,6 +234,8 @@ export function LibrarySettingsPage() {
     mutationFn: (id: string) => deleteDirectoryRule(id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['directory-rules'] });
+      queryClient.invalidateQueries({ queryKey: ['media-directories'] });
+      queryClient.invalidateQueries({ queryKey: ['media'] });
       setSelectedId(null);
       setForm(createDefaultPayload(directoryDefaults, promptDefaults));
     },

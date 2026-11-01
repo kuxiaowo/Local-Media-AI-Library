@@ -36,8 +36,13 @@ class Settings(BaseSettings):
 
     default_vision_model: str = "qwen2.5vl:7b"
     default_summary_model: str = "qwen3:8b"
+    ai_search_provider: str = "ollama"
     default_ai_search_model: str = "qwen3:8b"
     ai_search_max_turns: int = Field(default=8, ge=1, le=30)
+    deepseek_base_url: str = "https://api.deepseek.com"
+    deepseek_api_key: str = ""
+    deepseek_model: str = "deepseek-v4-flash"
+    deepseek_timeout_seconds: int = 180
     default_embedding_model: str = "nomic-embed-text"
     default_embedding_dimensions: int = 768
 

@@ -23,6 +23,7 @@ from app.models.schemas import (
 from app.services.conversational_search_service import run_agent_turn_events
 from app.services.ollama_client import OllamaClient
 from app.services.search_service import search_media
+from app.services.text_ai_client import ai_search_client
 
 router = APIRouter(prefix="/search", tags=["search"])
 
@@ -116,7 +117,7 @@ async def _chat_event_stream(payload: ChatStreamRequest):
         yield _sse("user_message", user_payload)
 
         with SessionLocal() as agent_db:
-            async for event in run_agent_turn_events(agent_db, payload, history, OllamaClient()):
+            async for event in run_agent_turn_events(agent_db, payload, history, ai_search_client()):
                 if event.event in {
                     "agent_action",
                     "final_answer",

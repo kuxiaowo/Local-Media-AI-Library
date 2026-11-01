@@ -7,12 +7,12 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import func, literal, select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.core.path_utils import normalize_path
-from app.models.db_models import EmbeddingProfile, MediaAiSummary, MediaEmbedding, MediaFile, SearchMessage
+from app.models.db_models import MediaAiSummary, MediaFile, SearchMessage
 from app.models.schemas import ChatStreamRequest
 from app.services.agent.context_builder import build_context_pack
 from app.services.agent.response_composer import blocks_to_text, stream_blocks
@@ -31,7 +31,7 @@ from app.services.agent.utils import (
 from app.services.media_visibility import visible_media_filter
 from app.services.ollama_client import OllamaClient
 from app.services.search_rerank import keyword_score
-from app.services.vector_math import cosine_similarity
+from app.services.text_ai_client import ai_search_model_name
 
 
 ACTION_NAMES = {
@@ -46,11 +46,13 @@ TOOL_ACTION_NAMES = ACTION_NAMES - {"answer_now"}
 ANSWER_TYPES = {"answer", "summary", "media_selection"}
 CONFIDENCE_VALUES = {"high", "medium", "low"}
 RESPONSE_MODES = {"answer", "use_tool"}
-DEFAULT_PAGE_SIZE = 40
-MAX_PAGE_SIZE = 50
+DEFAULT_DIRECTORY_PAGE_SIZE = 200
+MAX_DIRECTORY_PAGE_SIZE = 200
+DEFAULT_MEDIA_PAGE_SIZE = 100
+MAX_MEDIA_PAGE_SIZE = 100
 MAX_READ_PAGES_IN_CONTEXT = 8
 MAX_CANDIDATES_IN_CONTEXT = 160
-MAX_TOOL_EVENT_ITEMS = 20
+MAX_TOOL_EVENT_ITEMS = 200
 
 
 MEDIA_LIBRARY_ACTION_SCHEMA: dict[str, Any] = {
@@ -203,13 +205,14 @@ async def run_media_library_agent_turn_events(
     ollama: OllamaClient,
 ) -> Any:
     settings = get_settings()
-    model_name = settings.default_ai_search_model.strip() or settings.default_summary_model
+    model_name = ai_search_model_name(settings)
     max_agent_turns = _agent_max_turns(settings)
     base_context = build_context_pack(db, request, history)
+    candidate_media: list[dict[str, Any]] = _initial_candidate_media(db, base_context)
     db.close()
     visible_memory = base_context.visible_memory
     read_pages: list[dict[str, Any]] = []
-    candidate_media: list[dict[str, Any]] = []
+    expanded_media_this_turn = False
 
     for turn in range(1, max_agent_turns + 1):
         context_pack = replace(
@@ -243,6 +246,12 @@ async def run_media_library_agent_turn_events(
             and not _uuid_string_list(action.media.get("selected_media_ids") if isinstance(action.media, dict) else None, limit=1)
             and not candidate_media
             and not read_pages
+        ):
+            action = _forced_media_lookup_action(request)
+        elif (
+            action.action == "answer_now"
+            and _needs_fresh_media_lookup(request.message, base_context)
+            and not expanded_media_this_turn
         ):
             action = _forced_media_lookup_action(request)
 
@@ -297,6 +306,8 @@ async def run_media_library_agent_turn_events(
         if result.get("read_page"):
             read_pages.append(result["read_page"])
         if result.get("candidate_media"):
+            if action.action in {"list_media_descriptions", "search_descriptions"}:
+                expanded_media_this_turn = True
             candidate_media = _merge_candidate_payloads(candidate_media, result["candidate_media"])
             visible_memory = _merge_visible_memory(
                 visible_memory,
@@ -351,7 +362,18 @@ Context Pack：
 
 
 def _agent_system_prompt(max_agent_turns: int) -> str:
-    return MEDIA_LIBRARY_AGENT_SYSTEM_PROMPT.replace("{{max_agent_turns}}", str(max_agent_turns))
+    prompt = MEDIA_LIBRARY_AGENT_SYSTEM_PROMPT.replace("{{max_agent_turns}}", str(max_agent_turns))
+    return (
+        prompt
+        + "\n\n"
+        + "Card selection policy update:\n"
+        + "- search_descriptions returns database text candidates only; it never uses embeddings or vector similarity.\n"
+        + "- Final media cards must exactly match media.selected_media_ids in count and order.\n"
+        + "- If you mention concrete media in visible_response.text, include the same IDs in media.selected_media_ids.\n"
+        + "- You may select IDs from candidate_media, read_description_pages, or visible/history media already present in Context Pack.\n"
+        + "- list_directories/list_directory_info may request up to page_size=200; list_media_descriptions may request up to page_size=100.\n"
+        + "- If the user asks for more, another batch, a different folder, or not only current candidates, call search_descriptions or list_media_descriptions before answering.\n"
+    )
 
 
 def _agent_max_turns(settings: Any) -> int:
@@ -453,10 +475,73 @@ def _is_media_selection_request(message: str) -> bool:
     return any(pattern in text for pattern in ("找一张", "找几张", "找几段", "推荐几张", "推荐几个", "给我几张"))
 
 
+def _needs_fresh_media_lookup(message: str, context_pack: AgentContextPack) -> bool:
+    text = clean_text(message).lower()
+    if not text:
+        return False
+    media_terms = (
+        "照片",
+        "图片",
+        "图",
+        "视频",
+        "媒体",
+        "卡片",
+        "文件夹",
+        "目录",
+        "photo",
+        "photos",
+        "image",
+        "images",
+        "video",
+        "videos",
+        "media",
+        "folder",
+        "directory",
+        "card",
+        "cards",
+    )
+    fresh_terms = (
+        "继续找",
+        "继续搜索",
+        "再找",
+        "再搜",
+        "再来",
+        "更多",
+        "换一批",
+        "换个",
+        "换文件夹",
+        "换目录",
+        "其他",
+        "另一批",
+        "下一页",
+        "翻页",
+        "别只",
+        "不要只",
+        "more",
+        "another",
+        "different",
+        "new batch",
+        "next page",
+        "keep searching",
+        "continue searching",
+    )
+    has_fresh_intent = any(term in text for term in fresh_terms) or (
+        "继续" in text and any(term in text for term in media_terms)
+    )
+    if not has_fresh_intent:
+        return False
+    has_media_context = bool(
+        context_pack.ui_context.visible_media_ids
+        or context_pack.conversation_context.last_shown_media_ids
+        or context_pack.visible_memory.candidate_media_ids
+    )
+    return has_media_context or any(term in text for term in media_terms)
+
+
 def _forced_media_lookup_action(request: ChatStreamRequest) -> MediaAgentAction:
     arguments: dict[str, Any] = {
         "query": request.message,
-        "limit": request.limit,
+        "limit": max(request.limit, DEFAULT_MEDIA_PAGE_SIZE),
     }
     if request.media_type in {"image", "video"}:
         arguments["media_type"] = request.media_type
@@ -507,12 +592,16 @@ async def _execute_action(
 
 def _list_directories(context_pack: AgentContextPack, arguments: dict[str, Any]) -> dict[str, Any]:
     query = clean_text(arguments.get("query")).lower()
-    page, page_size = _page_args(arguments)
+    page, page_size = _page_args(
+        arguments,
+        default_page_size=DEFAULT_DIRECTORY_PAGE_SIZE,
+        max_page_size=MAX_DIRECTORY_PAGE_SIZE,
+    )
     nodes = context_pack.directory_tree
     if query:
         nodes = [node for node in nodes if query in f"{node.get('path')} {node.get('name')}".lower()]
     page_items, total = _page_slice(nodes, page=page, page_size=page_size)
-    result = {"page": page, "page_size": page_size, "total": total, "items": page_items}
+    result = {"page": page, "page_size": page_size, "total": total, "has_next": page * page_size < total, "items": page_items}
     return {
         "summary": f"返回目录 {len(page_items)}/{total} 个。",
         "result": result,
@@ -531,9 +620,13 @@ def _list_directory_info(context_pack: AgentContextPack, arguments: dict[str, An
         items = [item for item in items if normalize_path(item.get("path")) in normalized_paths]
     elif query:
         items = [item for item in items if query in clean_text(item.get("path")).lower()]
-    page, page_size = _page_args(arguments)
+    page, page_size = _page_args(
+        arguments,
+        default_page_size=DEFAULT_DIRECTORY_PAGE_SIZE,
+        max_page_size=MAX_DIRECTORY_PAGE_SIZE,
+    )
     page_items, total = _page_slice(items, page=page, page_size=page_size)
-    result = {"page": page, "page_size": page_size, "total": total, "items": page_items}
+    result = {"page": page, "page_size": page_size, "total": total, "has_next": page * page_size < total, "items": page_items}
     return {
         "summary": f"返回目录统计 {len(page_items)}/{total} 条。",
         "result": result,
@@ -541,7 +634,11 @@ def _list_directory_info(context_pack: AgentContextPack, arguments: dict[str, An
 
 
 def _list_media_descriptions(db: Session, request: ChatStreamRequest, arguments: dict[str, Any]) -> dict[str, Any]:
-    page, page_size = _page_args(arguments, default_page_size=DEFAULT_PAGE_SIZE)
+    page, page_size = _page_args(
+        arguments,
+        default_page_size=DEFAULT_MEDIA_PAGE_SIZE,
+        max_page_size=MAX_MEDIA_PAGE_SIZE,
+    )
     stmt = _media_description_stmt(db, request, arguments)
     total = int(db.scalar(select(func.count()).select_from(stmt.subquery())) or 0)
     rows = db.execute(_apply_sort(stmt, clean_text(arguments.get("sort"))).offset((page - 1) * page_size).limit(page_size)).all()
@@ -577,7 +674,7 @@ async def _search_descriptions(
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
     query = clean_text(arguments.get("query")) or request.message
-    limit = _int_arg(arguments.get("limit"), default=max(request.limit, 30), minimum=1, maximum=max(200, request.limit))
+    limit = _int_arg(arguments.get("limit"), default=max(request.limit, DEFAULT_MEDIA_PAGE_SIZE), minimum=1, maximum=max(200, request.limit))
     candidates = await _search_description_candidates(
         db=db,
         ollama=ollama,
@@ -614,7 +711,7 @@ async def _fallback_events(
     reason: str,
     allow_media_search: bool = True,
 ) -> Any:
-    fallback_tool = "fallback_keyword_vector_search" if allow_media_search else "fallback_no_media_selection"
+    fallback_tool = "fallback_text_search" if allow_media_search else "fallback_no_media_selection"
     yield AgentEvent(
         "agent_action",
         {
@@ -689,34 +786,17 @@ async def _search_description_candidates(
     arguments: dict[str, Any],
     limit: int,
 ) -> list[dict[str, Any]]:
-    profile_id = _embedding_profile_id(db)
-    if profile_id is not None:
-        stmt = (
-            select(MediaFile, MediaAiSummary, MediaEmbedding.embedding)
-            .join(MediaAiSummary, MediaAiSummary.media_id == MediaFile.id)
-            .outerjoin(
-                MediaEmbedding,
-                (MediaEmbedding.media_id == MediaFile.id) & (MediaEmbedding.profile_id == profile_id),
-            )
-        )
-    else:
-        stmt = select(MediaFile, MediaAiSummary, literal(None)).join(
-            MediaAiSummary, MediaAiSummary.media_id == MediaFile.id
-        )
+    stmt = select(MediaFile, MediaAiSummary).join(MediaAiSummary, MediaAiSummary.media_id == MediaFile.id)
     stmt = _apply_media_filters(db, stmt, request, arguments)
     rows = db.execute(stmt).all()
     db.close()
-    query_vector = await _query_vector(db, ollama, query) if rows else None
     scored: list[tuple[float, dict[str, Any]]] = []
-    for media, summary, embedding in rows:
-        vector = 0.0
-        if query_vector is not None and embedding:
-            vector = max(0.0, min(1.0, cosine_similarity(query_vector, embedding)))
+    for media, summary in rows:
         keyword = keyword_score(query, _searchable_text(summary))
-        score = 0.7 * vector + 0.3 * keyword if query_vector is not None else keyword
+        score = keyword
         if score <= 0 and query:
             score = 0.001
-        reason = f"回退/工具检索：vector={vector:.3f}, keyword={keyword:.3f}"
+        reason = f"Agent text candidate search: keyword={keyword:.3f}"
         scored.append((score, _candidate_from_row(media, summary, score=score, reason=reason)))
     scored.sort(key=lambda item: (item[0], datetime_sort_key(_parse_iso(item[1].get("captured_at")))), reverse=True)
     return [item for _score, item in scored[:limit]]
@@ -936,25 +1016,6 @@ def _searchable_text(summary: MediaAiSummary) -> str:
     )
 
 
-async def _query_vector(db: Session, ollama: OllamaClient, query: str) -> list[float] | None:
-    model_name = get_settings().default_embedding_model.strip()
-    profile_id = _embedding_profile_id(db) if model_name else None
-    db.close()
-    if not model_name or profile_id is None:
-        return None
-    try:
-        return await ollama.embed_text(model=model_name, text=query)
-    except Exception:
-        return None
-
-
-def _embedding_profile_id(db: Session):
-    model_name = get_settings().default_embedding_model.strip()
-    if not model_name:
-        return None
-    return db.scalar(select(EmbeddingProfile.id).where(EmbeddingProfile.model_name == model_name))
-
-
 def _final_answer_payload_from_action(action: MediaAgentAction) -> dict[str, Any]:
     payload: dict[str, Any] = {}
     legacy = action.arguments.get("final_answer") if isinstance(action.arguments.get("final_answer"), dict) else action.arguments
@@ -1067,6 +1128,21 @@ def _assistant_message(blocks: list[dict], model_name: str, *, candidate_count: 
             "candidate_count": candidate_count,
         },
     )
+
+
+def _initial_candidate_media(db: Session, context_pack: AgentContextPack) -> list[dict[str, Any]]:
+    media_ids = _context_candidate_media_ids(context_pack)
+    return _load_candidate_payloads(db, media_ids)
+
+
+def _context_candidate_media_ids(context_pack: AgentContextPack) -> list[str]:
+    values: list[str] = []
+    values.extend(context_pack.ui_context.selected_media_ids)
+    values.extend(context_pack.ui_context.visible_media_ids)
+    values.extend(context_pack.conversation_context.last_selected_media_ids)
+    values.extend(context_pack.conversation_context.last_shown_media_ids)
+    values.extend(context_pack.visible_memory.candidate_media_ids)
+    return _dedupe_uuid_strings(values, limit=MAX_CANDIDATES_IN_CONTEXT)
 
 
 def _candidate_payloads_for_ids(
@@ -1193,9 +1269,14 @@ def _public_media_selection(media: dict[str, Any]) -> dict[str, Any]:
     return {"selected_media_ids": _uuid_string_list(media.get("selected_media_ids"), limit=100)}
 
 
-def _page_args(arguments: dict[str, Any], *, default_page_size: int = DEFAULT_PAGE_SIZE) -> tuple[int, int]:
+def _page_args(
+    arguments: dict[str, Any],
+    *,
+    default_page_size: int,
+    max_page_size: int,
+) -> tuple[int, int]:
     page = _int_arg(arguments.get("page"), default=1, minimum=1, maximum=100000)
-    page_size = _int_arg(arguments.get("page_size"), default=default_page_size, minimum=1, maximum=MAX_PAGE_SIZE)
+    page_size = _int_arg(arguments.get("page_size"), default=default_page_size, minimum=1, maximum=max_page_size)
     return page, page_size
 
 

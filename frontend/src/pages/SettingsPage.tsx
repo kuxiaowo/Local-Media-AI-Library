@@ -25,9 +25,14 @@ import {
 import type { DirectoryRuleDefaults, RuntimeSettings } from '../types';
 
 const emptyRuntimeSettings: RuntimeSettings = {
+  ai_search_provider: 'ollama',
   default_embedding_model: 'nomic-embed-text',
   default_ai_search_model: 'qwen3:8b',
   ai_search_max_turns: 8,
+  deepseek_base_url: 'https://api.deepseek.com',
+  deepseek_model: 'deepseek-v4-flash',
+  deepseek_api_key: '',
+  deepseek_api_key_set: false,
   max_image_long_edge: 1280,
   scan_worker_concurrency: 1,
   metadata_worker_concurrency: 6,
@@ -953,6 +958,24 @@ export function SettingsPage() {
         </div>
         <div className="mb-4 grid gap-4 lg:grid-cols-2">
           <div>
+            <label>
+              <span className="mb-1 block text-sm font-medium">Agent 文本模型来源</span>
+              <select
+                className="control w-full"
+                value={runtimeForm.ai_search_provider}
+                onChange={(event) =>
+                  setRuntimeForm({ ...runtimeForm, ai_search_provider: event.target.value as RuntimeSettings['ai_search_provider'] })
+                }
+              >
+                <option value="ollama">Ollama 本地模型</option>
+                <option value="deepseek">DeepSeek API</option>
+              </select>
+            </label>
+            <p className="mt-1 text-xs leading-5 text-slate-500">
+              只影响 Agent 的文本决策和 JSON 回答；图片、视频分析和 embedding 仍使用本地 Ollama 配置。
+            </p>
+          </div>
+          <div>
             <ModelSelector
               id="global-embedding-model-options"
               label="全局 Embedding 模型"
@@ -981,6 +1004,29 @@ export function SettingsPage() {
               AI 检索会把已生成的媒体摘要文本交给这个本地模型，用于总结文件夹、推荐照片和精确重排候选结果。
             </p>
           </div>
+          <TextField
+            label="DeepSeek Base URL"
+            value={runtimeForm.deepseek_base_url}
+            onChange={(value) => setRuntimeForm({ ...runtimeForm, deepseek_base_url: value })}
+          />
+          <TextField
+            label="DeepSeek 模型"
+            value={runtimeForm.deepseek_model}
+            onChange={(value) => setRuntimeForm({ ...runtimeForm, deepseek_model: value })}
+          />
+          <label>
+            <span className="mb-1 block text-sm font-medium">DeepSeek API Key</span>
+            <input
+              className="control w-full"
+              type="password"
+              value={runtimeForm.deepseek_api_key}
+              placeholder={runtimeForm.deepseek_api_key_set ? '已保存，留空则不修改' : 'sk-...'}
+              onChange={(event) => setRuntimeForm({ ...runtimeForm, deepseek_api_key: event.target.value })}
+            />
+            <p className="mt-1 text-xs leading-5 text-slate-500">
+              保存后写入后端 .env；接口读取时不会明文返回。
+            </p>
+          </label>
           <div>
             <NumberField
               label="Agent 最大轮数"
@@ -1113,6 +1159,23 @@ function ModelSelector({
           <option key={model} value={model} />
         ))}
       </datalist>
+    </label>
+  );
+}
+
+function TextField({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <label>
+      <span className="mb-1 block text-sm font-medium">{label}</span>
+      <input className="control w-full" type="text" value={value} onChange={(event) => onChange(event.target.value)} required />
     </label>
   );
 }

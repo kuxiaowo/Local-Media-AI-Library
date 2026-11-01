@@ -1,0 +1,10 @@
+fastapi>=0.115,<1
+uvicorn>=0.30,<1
+httpx>=0.27,<1
+pillow>=10,<13
+pillow-heif>=0.18,<2
+rawpy>=0.24,<1
+numpy>=2,<3
+watchdog>=4,<7
+pytest>=8,<10
+ExifRead>=3.5,<4

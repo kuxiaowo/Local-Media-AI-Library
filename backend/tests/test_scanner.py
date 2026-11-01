@@ -287,6 +287,31 @@ def test_full_scan_does_not_duplicate_active_extract_metadata_job(tmp_path) -> N
     assert job_count == 1
 
 
+def test_recursive_scan_does_not_create_directory_rules_for_subfolders(tmp_path) -> None:
+    root = tmp_path / "Photos"
+    nested = root / "A" / "B"
+    sibling = root / "Sibling"
+    nested.mkdir(parents=True)
+    sibling.mkdir()
+    (nested / "deep.jpg").write_bytes(b"content")
+    (sibling / "clip.mp4").write_bytes(b"content")
+
+    engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
+    Base.metadata.create_all(engine)
+    SessionLocal = sessionmaker(bind=engine, future=True)
+
+    with SessionLocal() as db:
+        rule = _rule(root)
+        db.add(rule)
+        db.commit()
+
+        discovered = scan_directory(db, rule, mode="incremental", run_ai=False)
+        rule_count = db.scalar(select(func.count(DirectoryRule.id)))
+
+    assert discovered == 2
+    assert rule_count == 1
+
+
 def _rule(root) -> DirectoryRule:
     return DirectoryRule(
         path=str(root),
