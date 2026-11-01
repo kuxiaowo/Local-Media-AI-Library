@@ -334,16 +334,16 @@ class Scanner:
         except OSError as exc:
             self.db.execute("UPDATE roots SET state='offline',error=? WHERE id=?", (str(exc), root['id']))
 
-    def visit(self, root_id, path, current=None, stat=None, conn=None):
+    def visit(self, root_id, path, current=None, stat=None, conn=None, complete=False):
         if conn is None:
             with self.db.connect() as conn:
-                return self.visit(root_id, path, current, stat, conn=conn)
+                return self.visit(root_id, path, current, stat, conn=conn, complete=complete)
         key = normalized(path)
         stat = stat or path.stat()
         current = current or conn.execute('SELECT * FROM media WHERE path=?', (key,)).fetchone()
         fsid = f'{stat.st_dev}:{stat.st_ino}' if stat.st_ino else None
         # Newly written files are revisited; do not decode an in-progress copy.
-        if time.time() - stat.st_mtime < 2:
+        if not complete and time.time() - stat.st_mtime < 2:
             self.wake.set()
             return
         if current and (current['size'], current['mtime_ns']) == (stat.st_size, stat.st_mtime_ns):
