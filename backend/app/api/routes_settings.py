@@ -1,6 +1,7 @@
 from pathlib import Path
 import os
 import subprocess
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator
@@ -44,13 +45,19 @@ router = APIRouter(prefix="/settings", tags=["settings"])
 
 
 class RuntimeSettings(BaseModel):
+    ai_search_provider: Literal["ollama", "deepseek"] = "ollama"
     default_embedding_model: str = Field(min_length=1)
     default_ai_search_model: str = Field(min_length=1)
+    ai_search_max_turns: int = Field(ge=1, le=30)
+    deepseek_base_url: str = Field(default="https://api.deepseek.com", min_length=1)
+    deepseek_model: str = Field(default="deepseek-v4-flash", min_length=1)
+    deepseek_api_key: str = ""
+    deepseek_api_key_set: bool = False
     max_image_long_edge: int = Field(ge=256, le=4096)
-    scan_worker_concurrency: int = Field(ge=1, le=8)
-    metadata_worker_concurrency: int = Field(ge=1, le=32)
-    vision_worker_concurrency: int = Field(ge=1, le=4)
-    embedding_worker_concurrency: int = Field(ge=1, le=16)
+    scan_worker_concurrency: int = Field(ge=1)
+    metadata_worker_concurrency: int = Field(ge=1)
+    vision_worker_concurrency: int = Field(ge=1)
+    embedding_worker_concurrency: int = Field(default=1, ge=1)
 
     @field_validator("default_embedding_model")
     @classmethod
@@ -66,6 +73,22 @@ class RuntimeSettings(BaseModel):
         normalized = value.strip()
         if not normalized:
             raise ValueError("AI search model is required")
+        return normalized
+
+    @field_validator("deepseek_base_url")
+    @classmethod
+    def normalize_deepseek_base_url(cls, value: str) -> str:
+        normalized = value.strip().rstrip("/")
+        if not normalized:
+            raise ValueError("DeepSeek base URL is required")
+        return normalized
+
+    @field_validator("deepseek_model")
+    @classmethod
+    def normalize_deepseek_model(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("DeepSeek model is required")
         return normalized
 
 
@@ -87,7 +110,12 @@ def defaults() -> dict[str, object]:
     return {
         "default_vision_model": settings.default_vision_model,
         "default_summary_model": settings.default_summary_model,
+        "ai_search_provider": settings.ai_search_provider,
         "default_ai_search_model": settings.default_ai_search_model,
+        "ai_search_max_turns": settings.ai_search_max_turns,
+        "deepseek_base_url": settings.deepseek_base_url,
+        "deepseek_model": settings.deepseek_model,
+        "deepseek_api_key_set": bool(settings.deepseek_api_key.strip()),
         "default_embedding_model": settings.default_embedding_model,
         "default_embedding_dimensions": settings.default_embedding_dimensions,
         "max_image_long_edge": settings.max_image_long_edge,
@@ -98,8 +126,14 @@ def defaults() -> dict[str, object]:
 def runtime_settings() -> RuntimeSettings:
     settings = get_settings()
     return RuntimeSettings(
+        ai_search_provider=_ai_search_provider(settings.ai_search_provider),
         default_embedding_model=settings.default_embedding_model,
         default_ai_search_model=settings.default_ai_search_model,
+        ai_search_max_turns=settings.ai_search_max_turns,
+        deepseek_base_url=settings.deepseek_base_url,
+        deepseek_model=settings.deepseek_model,
+        deepseek_api_key="",
+        deepseek_api_key_set=bool(settings.deepseek_api_key.strip()),
         max_image_long_edge=settings.max_image_long_edge,
         scan_worker_concurrency=settings.scan_worker_concurrency,
         metadata_worker_concurrency=settings.metadata_worker_concurrency,
@@ -110,24 +144,32 @@ def runtime_settings() -> RuntimeSettings:
 
 @router.put("/runtime", response_model=RuntimeSettings)
 def update_runtime_settings(payload: RuntimeSettings, request: Request) -> RuntimeSettings:
-    _update_env_values(
-        Path(".env"),
-        {
-            "DEFAULT_EMBEDDING_MODEL": payload.default_embedding_model.strip(),
-            "DEFAULT_AI_SEARCH_MODEL": payload.default_ai_search_model.strip(),
-            "MAX_IMAGE_LONG_EDGE": str(payload.max_image_long_edge),
-            "SCAN_WORKER_CONCURRENCY": str(payload.scan_worker_concurrency),
-            "METADATA_WORKER_CONCURRENCY": str(payload.metadata_worker_concurrency),
-            "VISION_WORKER_CONCURRENCY": str(payload.vision_worker_concurrency),
-            "EMBEDDING_WORKER_CONCURRENCY": str(payload.embedding_worker_concurrency),
-        },
-    )
+    updates = {
+        "AI_SEARCH_PROVIDER": payload.ai_search_provider,
+        "DEFAULT_EMBEDDING_MODEL": payload.default_embedding_model.strip(),
+        "DEFAULT_AI_SEARCH_MODEL": payload.default_ai_search_model.strip(),
+        "AI_SEARCH_MAX_TURNS": str(payload.ai_search_max_turns),
+        "DEEPSEEK_BASE_URL": payload.deepseek_base_url.strip().rstrip("/"),
+        "DEEPSEEK_MODEL": payload.deepseek_model.strip(),
+        "MAX_IMAGE_LONG_EDGE": str(payload.max_image_long_edge),
+        "SCAN_WORKER_CONCURRENCY": str(payload.scan_worker_concurrency),
+        "METADATA_WORKER_CONCURRENCY": str(payload.metadata_worker_concurrency),
+        "VISION_WORKER_CONCURRENCY": str(payload.vision_worker_concurrency),
+        "EMBEDDING_WORKER_CONCURRENCY": str(payload.embedding_worker_concurrency),
+    }
+    if payload.deepseek_api_key.strip():
+        updates["DEEPSEEK_API_KEY"] = payload.deepseek_api_key.strip()
+    _update_env_values(Path(".env"), updates)
     get_settings.cache_clear()
     settings = get_settings()
     worker_manager = getattr(request.app.state, "worker_manager", None)
     if worker_manager is not None:
         worker_manager.reconfigure_from_settings(settings)
     return runtime_settings()
+
+
+def _ai_search_provider(value: str) -> Literal["ollama", "deepseek"]:
+    return "deepseek" if value.strip().lower() == "deepseek" else "ollama"
 
 
 @router.get("/directory-rule-defaults", response_model=DirectoryRuleDefaults)

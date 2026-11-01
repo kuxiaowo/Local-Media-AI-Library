@@ -181,6 +181,7 @@ export interface ScanStatus {
   running: number;
   failed: number;
   completed: number;
+  paused: boolean;
   media_total: number;
   media_done: number;
   media_failed: number;
@@ -188,6 +189,7 @@ export interface ScanStatus {
 }
 
 export type ScanMode = 'incremental' | 'full';
+export type GenerateAiRecordsMode = 'missing' | 'all_known';
 
 export interface MediaQueueItem {
   media_id: string;
@@ -222,8 +224,14 @@ export interface OllamaModels {
 }
 
 export interface RuntimeSettings {
+  ai_search_provider: 'ollama' | 'deepseek';
   default_embedding_model: string;
   default_ai_search_model: string;
+  ai_search_max_turns: number;
+  deepseek_base_url: string;
+  deepseek_model: string;
+  deepseek_api_key: string;
+  deepseek_api_key_set: boolean;
   max_image_long_edge: number;
   scan_worker_concurrency: number;
   metadata_worker_concurrency: number;
@@ -251,7 +259,7 @@ export interface SearchResultItem {
   score: number;
 }
 
-export type SearchMode = 'vector' | 'ai';
+export type SearchMode = 'vector';
 
 export interface SearchResponse {
   query: string;
@@ -266,4 +274,117 @@ export interface SearchResponse {
   answer: string | null;
   ai_model: string | null;
   scope_total: number | null;
+}
+
+export interface TextAssistantBlock {
+  type: 'text';
+  text: string;
+}
+
+export interface MediaGridAssistantBlock {
+  type: 'media_grid';
+  title?: string | null;
+  items: SearchResultItem[];
+}
+
+export interface SummaryAssistantBlock {
+  type: 'summary';
+  title?: string | null;
+  text: string;
+  representative_media_ids?: string[];
+}
+
+export interface QuestionAnswerAssistantBlock {
+  type: 'question_answer';
+  question?: string | null;
+  answer: string;
+  basis?: unknown;
+  confidence?: number | null;
+}
+
+export interface ClarificationAssistantBlock {
+  type: 'clarification';
+  question: string;
+}
+
+export interface StatsAssistantBlock {
+  type: 'stats';
+  stats: Record<string, unknown>;
+}
+
+export interface ComparisonAssistantBlock {
+  type: 'comparison';
+  title?: string | null;
+  rows: Array<Record<string, unknown>>;
+}
+
+export type AssistantBlock =
+  | TextAssistantBlock
+  | MediaGridAssistantBlock
+  | SummaryAssistantBlock
+  | QuestionAnswerAssistantBlock
+  | ClarificationAssistantBlock
+  | StatsAssistantBlock
+  | ComparisonAssistantBlock;
+
+export interface SearchMessage {
+  id: string;
+  conversation_id: string;
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+  blocks: AssistantBlock[] | null;
+  tool_events: Array<Record<string, unknown>> | null;
+  error_message: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SearchConversationSummary {
+  id: string;
+  title: string | null;
+  last_message_at: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SearchConversation extends SearchConversationSummary {
+  messages: SearchMessage[];
+}
+
+export interface ChatStreamPayload {
+  conversation_id?: string | null;
+  message: string;
+  media_type: 'image' | 'video' | 'any';
+  directory_path?: string | null;
+  date_from?: string | null;
+  date_to?: string | null;
+  limit: number;
+  candidate_k: number;
+  context?: {
+    runtime_context: {
+      now_iso: string;
+      today: string;
+      timezone: string;
+      locale: string;
+      recent_default_days: number;
+    };
+    ui_context: {
+      page?: string | null;
+      current_directory_path?: string | null;
+      selected_media_ids: string[];
+      visible_media_ids: string[];
+      active_filters: {
+        media_type?: 'image' | 'video' | 'any' | null;
+        directory_path?: string | null;
+        date_from?: string | null;
+        date_to?: string | null;
+        keyword?: string | null;
+      };
+    };
+  };
+}
+
+export interface ChatStreamEvent {
+  event: string;
+  data: Record<string, unknown>;
 }

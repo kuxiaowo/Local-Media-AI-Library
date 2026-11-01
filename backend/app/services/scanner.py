@@ -1,16 +1,26 @@
 from __future__ import annotations
 
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.core.path_utils import normalize_path, parent_dir, path_has_prefix
-from app.models.db_models import DirectoryRule, MediaFile
-from app.services.job_service import create_job
+from app.models.db_models import (
+    DirectoryRule,
+    MediaAiSummary,
+    MediaEmbedding,
+    MediaFile,
+    VideoFrameSummary,
+    VideoSegmentSummary,
+)
+from app.services.job_service import active_job_target_ids, enqueue_job
 from app.services.media_detector import detect_media_type, image_support_status
 from app.services.media_visibility import is_rule_effectively_enabled
+
+SCAN_COMMIT_BATCH_SIZE = 200
 
 
 def scan_directory(
@@ -36,6 +46,9 @@ def scan_directory(
     iterator = root.rglob("*") if rule.recursive else root.glob("*")
     discovered = 0
     seen_paths: set[str] = set()
+    pending_changes = 0
+    changed_media_ids: list[uuid.UUID] = []
+    active_extract_metadata_ids = active_job_target_ids(db, ("extract_metadata",))
 
     for path in iterator:
         if not path.is_file():
@@ -54,45 +67,61 @@ def scan_directory(
         media = db.scalar(select(MediaFile).where(MediaFile.normalized_path == normalized))
         created = media is None
         was_missing = media is not None and media.status == "missing"
+        file_modified_at = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
+        content_changed = False
         if media is None:
             media = MediaFile(
+                id=uuid.uuid4(),
                 path=str(path),
                 normalized_path=normalized,
                 root_path=rule.normalized_path,
                 parent_dir=parent_dir(str(path)),
                 media_type=media_type,
                 file_size=stat.st_size,
-                file_modified_at=datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc),
+                file_modified_at=file_modified_at,
                 last_seen_at=scan_started_at,
                 status="pending",
             )
             db.add(media)
-            db.flush()
         else:
+            content_changed = mode == "incremental" and not was_missing and _file_signature_changed(
+                media,
+                size=stat.st_size,
+                modified_at=file_modified_at,
+            )
             media.path = str(path)
             media.root_path = rule.normalized_path
             media.parent_dir = parent_dir(str(path))
             media.file_size = stat.st_size
-            media.file_modified_at = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
+            media.file_modified_at = file_modified_at
             media.last_seen_at = scan_started_at
             if mode == "full":
                 media.status = "pending"
                 media.error_message = None
-            elif was_missing:
+            elif was_missing or content_changed:
                 media.status = "pending"
                 media.error_message = None
+
+        if content_changed:
+            changed_media_ids.append(media.id)
+            media.file_hash = None
+            media.thumbnail_path = None
 
         if media_type == "image" and image_support_status(path) == "recognized_unsupported":
             media.status = "failed"
             media.error_message = "HEIC/HEIF is recognized but not supported in the MVP"
-        elif mode == "full" or created or was_missing:
-            create_job(
+        elif mode == "full" or created or was_missing or content_changed:
+            _enqueue_extract_metadata_if_needed(
                 db,
-                job_type="extract_metadata",
-                target_id=media.id,
-                target_path=media.path,
-                payload={"run_ai": run_ai},
+                media=media,
+                run_ai=run_ai,
+                active_target_ids=active_extract_metadata_ids,
             )
+        pending_changes += 1
+        if pending_changes >= SCAN_COMMIT_BATCH_SIZE:
+            _commit_scan_batch(db, changed_media_ids)
+            changed_media_ids = []
+            pending_changes = 0
 
     existing = db.scalars(
         select(MediaFile).where(MediaFile.root_path == rule.normalized_path, MediaFile.status != "missing")
@@ -104,8 +133,55 @@ def scan_directory(
             media.status = "missing"
             media.error_message = "File was not found during the latest scan"
 
+    _commit_scan_batch(db, changed_media_ids)
     db.commit()
     return discovered
+
+
+def _enqueue_extract_metadata_if_needed(
+    db: Session,
+    *,
+    media: MediaFile,
+    run_ai: bool,
+    active_target_ids: set[uuid.UUID],
+) -> None:
+    if media.id in active_target_ids:
+        return
+    enqueue_job(
+        db,
+        job_type="extract_metadata",
+        target_id=media.id,
+        target_path=media.path,
+        payload={"run_ai": run_ai},
+    )
+    active_target_ids.add(media.id)
+
+
+def _commit_scan_batch(db: Session, changed_media_ids: list[uuid.UUID]) -> None:
+    if changed_media_ids:
+        _clear_stale_derived_data(db, changed_media_ids)
+    db.commit()
+
+
+def _clear_stale_derived_data(db: Session, media_ids: list[uuid.UUID]) -> None:
+    if not media_ids:
+        return
+    db.execute(delete(VideoFrameSummary).where(VideoFrameSummary.media_id.in_(media_ids)))
+    db.execute(delete(VideoSegmentSummary).where(VideoSegmentSummary.media_id.in_(media_ids)))
+    db.execute(delete(MediaEmbedding).where(MediaEmbedding.media_id.in_(media_ids)))
+    db.execute(delete(MediaAiSummary).where(MediaAiSummary.media_id.in_(media_ids)))
+
+
+def _file_signature_changed(media: MediaFile, *, size: int, modified_at: datetime) -> bool:
+    if media.file_size is None or media.file_modified_at is None:
+        return True
+    return int(media.file_size) != int(size) or _mtime_seconds(media.file_modified_at) != _mtime_seconds(modified_at)
+
+
+def _mtime_seconds(value: datetime) -> int:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return int(value.timestamp())
 
 
 def _disabled_descendant_paths(rule: DirectoryRule, rules: list[DirectoryRule]) -> list[str]:

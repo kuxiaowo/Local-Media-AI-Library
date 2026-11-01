@@ -10,9 +10,13 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    app_host: str = "127.0.0.1"
+    app_host: str = "0.0.0.0"
     app_port: int = 8000
     database_url: str = "mysql+pymysql://media_ai:media_ai@localhost:3306/media_ai?charset=utf8mb4"
+    database_pool_size: int = Field(default=10, ge=1)
+    database_max_overflow: int = Field(default=20, ge=0)
+    database_pool_timeout_seconds: int = Field(default=30, ge=1)
+    database_pool_recycle_seconds: int = Field(default=1800, ge=1)
 
     ollama_base_url: str = "http://localhost:11434"
     ollama_timeout_seconds: int = 180
@@ -32,7 +36,13 @@ class Settings(BaseSettings):
 
     default_vision_model: str = "qwen2.5vl:7b"
     default_summary_model: str = "qwen3:8b"
+    ai_search_provider: str = "ollama"
     default_ai_search_model: str = "qwen3:8b"
+    ai_search_max_turns: int = Field(default=8, ge=1, le=30)
+    deepseek_base_url: str = "https://api.deepseek.com"
+    deepseek_api_key: str = ""
+    deepseek_model: str = "deepseek-v4-flash"
+    deepseek_timeout_seconds: int = 180
     default_embedding_model: str = "nomic-embed-text"
     default_embedding_dimensions: int = 768
 
@@ -40,14 +50,23 @@ class Settings(BaseSettings):
     scan_worker_concurrency: int = 1
     metadata_worker_concurrency: int = 6
     vision_worker_concurrency: int = 1
-    embedding_worker_concurrency: int = 2
+    embedding_worker_concurrency: int = 1
     cors_origins: list[str] = Field(
         default_factory=lambda: [
             "http://localhost:5173",
             "http://127.0.0.1:5173",
+            "http://0.0.0.0:5173",
             "http://localhost:4173",
             "http://127.0.0.1:4173",
+            "http://0.0.0.0:4173",
         ]
+    )
+    cors_origin_regex: str | None = (
+        r"https?://(localhost|127\.0\.0\.1|0\.0\.0\.0|"
+        r"10(?:\.\d{1,3}){3}|"
+        r"192\.168(?:\.\d{1,3}){2}|"
+        r"172\.(?:1[6-9]|2\d|3[0-1])(?:\.\d{1,3}){2})"
+        r"(?::\d+)?"
     )
 
     def ensure_dirs(self) -> None:

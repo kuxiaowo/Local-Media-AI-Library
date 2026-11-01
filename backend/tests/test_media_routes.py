@@ -4,6 +4,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.api.routes_media import list_media, list_media_directories, update_media_background_context
+from app.core.path_utils import normalize_path
 from app.database import Base
 from app.models.db_models import DirectoryRule, MediaFile
 from app.models.schemas import MediaBackgroundContextUpdate
@@ -199,6 +200,60 @@ def test_list_media_directories_includes_intermediate_parent_directories() -> No
     assert "f:/library/a/a/deep/leaf" in by_path
     assert by_path["f:/library/a"].direct_media_count == 0
     assert by_path["f:/library/a/a/deep/leaf"].direct_media_count == 1
+
+
+def test_list_media_directories_existing_only_hides_missing_directories(tmp_path) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
+    Base.metadata.create_all(engine)
+    SessionLocal = sessionmaker(bind=engine, future=True)
+    root_path = tmp_path / "library"
+    existing_dir = root_path / "existing"
+    missing_dir = root_path / "missing"
+    existing_dir.mkdir(parents=True)
+
+    with SessionLocal() as db:
+        rule = DirectoryRule(
+            path=str(root_path),
+            normalized_path=normalize_path(root_path),
+            recursive=True,
+            vision_model="vision-model",
+            summary_model="summary-model",
+            video_frame_strategy="hybrid",
+            frame_interval_seconds=5,
+            max_frames_per_video=12,
+            video_frame_max_width=1280,
+            video_batch_size=6,
+            video_batch_overlap=1,
+            analysis_detail="normal",
+            enabled=True,
+        )
+        existing_media = MediaFile(
+            path=str(existing_dir / "visible.jpg"),
+            normalized_path=normalize_path(existing_dir / "visible.jpg"),
+            root_path=normalize_path(root_path),
+            parent_dir=normalize_path(existing_dir),
+            media_type="image",
+            status="metadata_done",
+            folder_rule=rule,
+        )
+        missing_media = MediaFile(
+            path=str(missing_dir / "stale.jpg"),
+            normalized_path=normalize_path(missing_dir / "stale.jpg"),
+            root_path=normalize_path(root_path),
+            parent_dir=normalize_path(missing_dir),
+            media_type="image",
+            status="metadata_done",
+            folder_rule=rule,
+        )
+        db.add_all([rule, existing_media, missing_media])
+        db.commit()
+
+        directories = list_media_directories(existing_only=True, db=db)
+
+    paths = {directory.path for directory in directories}
+    assert normalize_path(root_path) in paths
+    assert normalize_path(existing_dir) in paths
+    assert normalize_path(missing_dir) not in paths
 
 
 def test_list_media_hides_media_under_disabled_child_rule() -> None:

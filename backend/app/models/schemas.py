@@ -198,6 +198,7 @@ class ScanStartRequest(BaseModel):
 
 class GenerateAiRecordsRequest(BaseModel):
     directory_rule_id: uuid.UUID | None = None
+    mode: Literal["missing", "all_known"] = "missing"
 
 
 class JobRead(BaseModel):
@@ -226,10 +227,15 @@ class ScanStatusResponse(BaseModel):
     running: int
     failed: int
     completed: int
+    paused: bool = False
     media_total: int
     media_done: int
     media_failed: int
     media_missing: int
+
+
+class ScanPauseResponse(BaseModel):
+    paused: bool
 
 
 class MediaQueueItem(BaseModel):
@@ -256,7 +262,7 @@ class MediaQueueResponse(BaseModel):
 
 class SearchRequest(BaseModel):
     query: str
-    mode: Literal["vector", "ai"] = "vector"
+    mode: Literal["vector"] = "vector"
     media_type: Literal["image", "video", "any"] = "any"
     directory_rule_ids: list[uuid.UUID] = Field(default_factory=list)
     directory_path: str | None = None
@@ -286,14 +292,136 @@ class SearchResultItem(BaseModel):
     score: float
 
 
+class TextAssistantBlock(BaseModel):
+    type: Literal["text"] = "text"
+    text: str
+
+
+class MediaGridAssistantBlock(BaseModel):
+    type: Literal["media_grid"] = "media_grid"
+    title: str | None = None
+    items: list[SearchResultItem] = Field(default_factory=list)
+
+
+class SummaryAssistantBlock(BaseModel):
+    type: Literal["summary"] = "summary"
+    title: str | None = None
+    text: str
+    representative_media_ids: list[uuid.UUID] = Field(default_factory=list)
+
+
+class QuestionAnswerAssistantBlock(BaseModel):
+    type: Literal["question_answer"] = "question_answer"
+    question: str | None = None
+    answer: str
+    basis: Any = None
+    confidence: float | None = None
+
+
+class ClarificationAssistantBlock(BaseModel):
+    type: Literal["clarification"] = "clarification"
+    question: str
+
+
+class StatsAssistantBlock(BaseModel):
+    type: Literal["stats"] = "stats"
+    stats: dict[str, Any] = Field(default_factory=dict)
+
+
+class ComparisonAssistantBlock(BaseModel):
+    type: Literal["comparison"] = "comparison"
+    title: str | None = None
+    rows: list[dict[str, Any]] = Field(default_factory=list)
+
+
+AssistantBlock = (
+    TextAssistantBlock
+    | MediaGridAssistantBlock
+    | SummaryAssistantBlock
+    | QuestionAnswerAssistantBlock
+    | ClarificationAssistantBlock
+    | StatsAssistantBlock
+    | ComparisonAssistantBlock
+)
+
+
 class SearchResponse(BaseModel):
     query: str
-    mode: Literal["vector", "ai"] = "vector"
+    mode: Literal["vector"] = "vector"
     parsed_filters: ParsedFilters
     results: list[SearchResultItem]
     answer: str | None = None
     ai_model: str | None = None
     scope_total: int | None = None
+
+
+class ChatRuntimeContext(BaseModel):
+    now_iso: str | None = None
+    today: str | None = None
+    timezone: str | None = "Asia/Shanghai"
+    locale: str | None = "zh-CN"
+    recent_default_days: int | None = Field(default=30, ge=1, le=365)
+
+
+class ChatActiveFilters(BaseModel):
+    media_type: Literal["image", "video", "any"] | None = None
+    directory_path: str | None = None
+    date_from: datetime | str | None = None
+    date_to: datetime | str | None = None
+    keyword: str | None = None
+
+
+class ChatUiContext(BaseModel):
+    page: str | None = None
+    current_directory_path: str | None = None
+    selected_media_ids: list[uuid.UUID] = Field(default_factory=list)
+    visible_media_ids: list[uuid.UUID] = Field(default_factory=list)
+    active_filters: ChatActiveFilters = Field(default_factory=ChatActiveFilters)
+
+
+class ChatAgentContext(BaseModel):
+    runtime_context: ChatRuntimeContext = Field(default_factory=ChatRuntimeContext)
+    ui_context: ChatUiContext = Field(default_factory=ChatUiContext)
+
+
+class ChatStreamRequest(BaseModel):
+    conversation_id: uuid.UUID | None = None
+    message: str = Field(min_length=1)
+    media_type: Literal["image", "video", "any"] = "any"
+    directory_path: str | None = None
+    date_from: datetime | None = None
+    date_to: datetime | None = None
+    limit: int = Field(default=30, ge=1, le=100)
+    candidate_k: int = Field(default=200, ge=1, le=1000)
+    context: ChatAgentContext | None = None
+
+
+class SearchMessageRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    conversation_id: uuid.UUID
+    role: Literal["user", "assistant", "system"]
+    content: str
+    blocks: Any = None
+    tool_events: Any = None
+    error_message: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class SearchConversationSummaryRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    title: str | None
+    last_message_at: datetime
+    created_at: datetime
+    updated_at: datetime
+
+
+class SearchConversationRead(SearchConversationSummaryRead):
+    messages: list[SearchMessageRead] = Field(default_factory=list)
 
 
 class OllamaStatusResponse(BaseModel):

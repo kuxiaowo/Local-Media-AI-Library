@@ -1,0 +1,9 @@
+name: localmedia-v2
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip
+  - ffmpeg
+  - pip:
+      - -r requirements-localmedia.txt

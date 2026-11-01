@@ -1,5 +1,11 @@
 # Local Media AI Library
 
+> **LocalMedia 2 新入口：** 双击 `Start-LocalMedia.cmd`，或在独立 conda 环境 `localmedia-v2` 中运行 `python run_localmedia.py`。
+>
+> 新版是 Lightroom 风格的只读照片／视频图库：SQLite、本机统一网页入口、手动 AI、视频检查点和本地向量搜索。首次安装、配置与使用见 [LocalMedia 2 文档](docs/LOCALMEDIA-V2.md)。
+>
+> 以下为保留的旧版说明；新版不需要 MySQL，也不需要分别启动前后端。
+
 本地 AI 媒体记忆库。首轮 MVP 面向 Windows，本机运行后端和 Web UI，扫描图片和视频目录，生成缩略图，调用本地 Ollama 视觉模型生成摘要，再用 Ollama embedding + MySQL JSON 向量做语义搜索。
 
 ## 当前范围
@@ -63,7 +69,7 @@ python -m venv .venv
 python -m pip install -r requirements-dev.txt
 Copy-Item .env.example .env
 alembic upgrade head
-uvicorn app.main:app --host 127.0.0.1 --port 8000
+uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
 也可以在项目根目录直接运行调试脚本：
@@ -108,6 +114,12 @@ conda install -c conda-forge nodejs
 http://127.0.0.1:5173
 ```
 
+局域网设备访问时，把地址里的 `127.0.0.1` 换成运行本项目这台机器的局域网 IP，例如：
+
+```text
+http://192.168.1.10:5173
+```
+
 ## 基本流程
 
 1. 打开 Web UI。
@@ -115,7 +127,7 @@ http://127.0.0.1:5173
 3. 填写本机已有的 Ollama 模型。
 4. 点击扫描。
 5. 在“扫描任务”查看队列。
-6. 在“媒体浏览”打开图片或视频详情；视频详情会显示关键帧。
+6. 在“媒体浏览”单击图片或视频进入完整详情页；视频播放器直接内嵌，详情会显示全部持久抽帧。
 7. 在“AI 搜索”输入自然语言查询。
 
 ## 视频抽帧设置

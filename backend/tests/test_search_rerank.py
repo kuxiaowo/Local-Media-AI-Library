@@ -18,6 +18,13 @@ def test_time_score_requires_range_match() -> None:
     assert time_score(captured, start, end) == 1.0
 
 
+def test_time_score_handles_mixed_timezone_awareness() -> None:
+    captured = datetime(2025, 7, 1, 8, 0, tzinfo=timezone.utc)
+    start = datetime(2025, 7, 1, 0, 0)
+    end = datetime(2025, 7, 2, 0, 0)
+    assert time_score(captured, start, end) == 1.0
+
+
 def test_final_score_is_weighted() -> None:
     score = final_score(
         RerankInput(

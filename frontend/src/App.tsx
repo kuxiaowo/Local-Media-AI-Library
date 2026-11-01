@@ -1,5 +1,6 @@
 import { Navigate, Route, Routes } from 'react-router-dom';
 import { Layout } from './components/Layout';
+import { AgentPage } from './pages/AgentPage';
 import { LibrarySettingsPage } from './pages/LibrarySettingsPage';
 import { MediaBrowserPage } from './pages/MediaBrowserPage';
 import { MediaDetailPage } from './pages/MediaDetailPage';
@@ -17,6 +18,7 @@ export default function App() {
         <Route path="media" element={<MediaBrowserPage />} />
         <Route path="media/:id" element={<MediaDetailPage />} />
         <Route path="search" element={<SearchPage />} />
+        <Route path="agent" element={<AgentPage />} />
         <Route path="settings" element={<SettingsPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>

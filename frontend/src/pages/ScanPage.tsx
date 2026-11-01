@@ -1,7 +1,16 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { ImageOff, Play, RefreshCw, RotateCcw, Trash2 } from 'lucide-react';
+import { ImageOff, Pause, Play, RefreshCw, RotateCcw, Trash2 } from 'lucide-react';
 import { API_BASE } from '../api/client';
-import { clearJobs, getMediaQueue, getScanStatus, listJobs, retryJob, startScan } from '../api/scan';
+import {
+  clearJobs,
+  getMediaQueue,
+  getScanStatus,
+  listJobs,
+  pauseScanTasks,
+  resumeScanTasks,
+  retryJob,
+  startScan,
+} from '../api/scan';
 import { StatusBadge } from '../components/StatusBadge';
 import type { Job, MediaQueueItem } from '../types';
 
@@ -48,8 +57,26 @@ export function ScanPage() {
       queryClient.invalidateQueries({ queryKey: ['jobs'] });
     },
   });
+  const pauseMutation = useMutation({
+    mutationFn: pauseScanTasks,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['media-queue'] });
+      queryClient.invalidateQueries({ queryKey: ['scan-status'] });
+      queryClient.invalidateQueries({ queryKey: ['jobs'] });
+    },
+  });
+  const resumeMutation = useMutation({
+    mutationFn: resumeScanTasks,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['media-queue'] });
+      queryClient.invalidateQueries({ queryKey: ['scan-status'] });
+      queryClient.invalidateQueries({ queryKey: ['jobs'] });
+    },
+  });
 
   const status = statusQuery.data;
+  const isPaused = status?.paused ?? false;
+  const isPauseTogglePending = pauseMutation.isPending || resumeMutation.isPending;
   const queueItems = mediaQueueQuery.data?.items ?? [];
   const maintenanceJobs = (jobsQuery.data ?? []).filter((job) => maintenanceJobTypes.has(job.job_type));
   const jobCount =
@@ -66,11 +93,26 @@ export function ScanPage() {
           <button
             className="btn btn-primary"
             onClick={() => startMutation.mutate()}
-            disabled={startMutation.isPending}
-            title="只发现并处理新文件，不重算已有文件"
+            disabled={startMutation.isPending || isPaused}
+            title={isPaused ? '任务已暂停，继续后再检测新文件' : '只发现并处理新文件，不重算已有文件'}
           >
             <Play className="h-4 w-4" />
             检测新文件
+          </button>
+          <button
+            className={isPaused ? 'btn btn-primary' : 'btn'}
+            onClick={() => {
+              if (isPaused) {
+                resumeMutation.mutate();
+              } else {
+                pauseMutation.mutate();
+              }
+            }}
+            disabled={isPauseTogglePending}
+            title={isPaused ? '继续派发排队中的任务' : '暂停派发新任务，已运行的任务会完成当前处理'}
+          >
+            {isPaused ? <Play className="h-4 w-4" /> : <Pause className="h-4 w-4" />}
+            {isPaused ? '继续任务' : '暂停所有任务'}
           </button>
           <button
             className="btn"
@@ -89,6 +131,7 @@ export function ScanPage() {
       </header>
 
       <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <Metric label="任务派发" value={isPaused ? '已暂停' : '运行中'} />
         <Metric label="队列" value={status?.queued ?? 0} />
         <Metric label="运行中" value={status?.running ?? 0} />
         <Metric label="已完成任务" value={status?.completed ?? 0} />
@@ -273,7 +316,7 @@ export function ScanPage() {
   );
 }
 
-function Metric({ label, value }: { label: string; value: number }) {
+function Metric({ label, value }: { label: string; value: number | string }) {
   return (
     <div className="panel p-4">
       <div className="text-xs text-slate-500">{label}</div>
@@ -324,16 +367,13 @@ function stageLabel(item: MediaQueueItem) {
     if (stage === 'final_summary') {
       return 'AI 分析视频：生成最终总结';
     }
-    if (stage === 'queue_embedding') {
-      return 'AI 分析视频：整理结果';
+    if (stage === 'generate_embedding' || stage === 'queue_embedding') {
+      return 'AI 分析视频：生成搜索向量';
     }
     return 'AI 分析视频';
   }
   if (item.job_type === 'reanalyze_video_summary') {
     return '重新生成视频最终总结';
-  }
-  if (item.job_type === 'generate_embedding') {
-    return '生成搜索向量';
   }
   if (item.job_type === 'reanalyze_media') {
     return '准备重新分析';
@@ -345,7 +385,7 @@ function stageLabel(item: MediaQueueItem) {
     return '等待 AI 分析';
   }
   if (item.media_status === 'embedding_pending') {
-    return '等待生成搜索向量';
+    return 'AI 总结完成，等待生成搜索向量';
   }
   if (item.media_status === 'analyzing') {
     return 'AI 分析图片';

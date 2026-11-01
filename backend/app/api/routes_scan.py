@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
@@ -11,10 +11,11 @@ from app.models.schemas import (
     JobRead,
     MediaQueueItem,
     MediaQueueResponse,
+    ScanPauseResponse,
     ScanStartRequest,
     ScanStatusResponse,
 )
-from app.services.job_service import create_job, scan_status
+from app.services.job_service import create_job, enqueue_job, scan_status
 from app.services.media_visibility import effective_enabled_rules, is_rule_effectively_enabled, visible_media_filter
 
 router = APIRouter(prefix="/scan", tags=["scan"])
@@ -23,13 +24,13 @@ MEDIA_JOB_TYPES = {
     "extract_metadata",
     "analyze_image",
     "analyze_video",
-    "generate_embedding",
     "reanalyze_media",
     "reanalyze_video_summary",
+    "generate_embedding",
 }
 ACTIVE_JOB_STATUSES = {"queued", "running", "failed"}
 ACTIVE_ANALYSIS_JOB_STATUSES = {"queued", "running"}
-ANALYSIS_JOB_TYPES = MEDIA_JOB_TYPES - {"generate_embedding"}
+ANALYSIS_JOB_TYPES = {"analyze_image", "analyze_video", "reanalyze_video_summary"}
 
 
 @router.post("/start", response_model=list[JobRead])
@@ -65,17 +66,21 @@ def generate_ai_records(payload: GenerateAiRecordsRequest, db: Session = Depends
     active_analysis_media_ids = set(
         db.scalars(
             select(Job.target_id).where(
-                Job.job_type.in_(list(ANALYSIS_JOB_TYPES)),
+                Job.job_type.in_(list(MEDIA_JOB_TYPES)),
                 Job.status.in_(list(ACTIVE_ANALYSIS_JOB_STATUSES)),
                 Job.target_id.is_not(None),
             )
         ).all()
     )
+    if payload.mode == "all_known":
+        candidate_filter = MediaFile.status != "missing"
+    else:
+        candidate_filter = MediaFile.status == "metadata_done"
     candidates = list(
         db.scalars(
             select(MediaFile)
             .where(
-                MediaFile.status.in_(("metadata_done", "needs_reanalysis")),
+                candidate_filter,
                 visible_media_filter(db),
                 or_(*path_filters),
             )
@@ -88,7 +93,9 @@ def generate_ai_records(payload: GenerateAiRecordsRequest, db: Session = Depends
     for media in candidates:
         if media.id in active_analysis_media_ids or media.id in queued_media_ids:
             continue
-        if media.media_type == "video":
+        if payload.mode == "all_known":
+            job_type = "reanalyze_media"
+        elif media.media_type == "video":
             job_type = "analyze_video"
         elif media.media_type == "image":
             job_type = "analyze_image"
@@ -96,18 +103,42 @@ def generate_ai_records(payload: GenerateAiRecordsRequest, db: Session = Depends
             continue
         media.error_message = None
         db.add(media)
-        jobs.append(create_job(db, job_type=job_type, target_id=media.id, target_path=media.path))
+        jobs.append(enqueue_job(db, job_type=job_type, target_id=media.id, target_path=media.path))
         queued_media_ids.add(media.id)
+    if jobs:
+        db.commit()
+        for job in jobs:
+            db.refresh(job)
     return jobs
 
 
 @router.get("/status", response_model=ScanStatusResponse)
-def get_scan_status(db: Session = Depends(get_db)) -> dict[str, int]:
-    return scan_status(db)
+def get_scan_status(request: Request, db: Session = Depends(get_db)) -> dict[str, int | bool]:
+    status = scan_status(db)
+    status["paused"] = _tasks_paused(request)
+    return status
+
+
+@router.post("/pause", response_model=ScanPauseResponse)
+def pause_scan_tasks(request: Request) -> ScanPauseResponse:
+    worker_manager = getattr(request.app.state, "worker_manager", None)
+    if worker_manager is None:
+        raise HTTPException(status_code=503, detail="Worker manager is not available")
+    worker_manager.pause()
+    return ScanPauseResponse(paused=True)
+
+
+@router.post("/resume", response_model=ScanPauseResponse)
+def resume_scan_tasks(request: Request) -> ScanPauseResponse:
+    worker_manager = getattr(request.app.state, "worker_manager", None)
+    if worker_manager is None:
+        raise HTTPException(status_code=503, detail="Worker manager is not available")
+    worker_manager.resume()
+    return ScanPauseResponse(paused=False)
 
 
 @router.get("/media-queue", response_model=MediaQueueResponse)
-def get_media_queue(limit: int = 200, db: Session = Depends(get_db)) -> MediaQueueResponse:
+def get_media_queue(db: Session = Depends(get_db)) -> MediaQueueResponse:
     active_jobs = list(
         db.scalars(
             select(Job)
@@ -117,7 +148,6 @@ def get_media_queue(limit: int = 200, db: Session = Depends(get_db)) -> MediaQue
                 Job.target_id.is_not(None),
             )
             .order_by(Job.created_at.desc())
-            .limit(1000)
         ).all()
     )
     jobs_by_media: dict[object, list[Job]] = {}
@@ -147,11 +177,11 @@ def get_media_queue(limit: int = 200, db: Session = Depends(get_db)) -> MediaQue
         if job is None:
             continue
         current_entries.append((media, job))
+    current_entries.sort(key=_queue_entry_sort_key)
 
     total = len(current_entries)
-    page_size = max(0, min(limit, 500))
     items = []
-    for media, job in current_entries[:page_size]:
+    for media, job in current_entries:
         items.append(
             MediaQueueItem(
                 media_id=media.id,
@@ -191,14 +221,6 @@ def _is_superseded_failed_job(job: Job, media: MediaFile) -> bool:
 def _select_current_job(jobs: list[Job], media: MediaFile) -> Job | None:
     if not jobs:
         return None
-    if media.status in {"done", "embedding_pending"}:
-        embedding_jobs = [
-            job
-            for job in jobs
-            if job.job_type == "generate_embedding" and job.status in ACTIVE_JOB_STATUSES
-        ]
-        if embedding_jobs:
-            jobs = embedding_jobs
     status_rank = {"running": 0, "queued": 1, "failed": 2}
 
     def sort_key(job: Job) -> tuple[int, float]:
@@ -206,6 +228,13 @@ def _select_current_job(jobs: list[Job], media: MediaFile) -> Job | None:
         return (status_rank.get(job.status, 9), -timestamp.timestamp())
 
     return sorted(jobs, key=sort_key)[0]
+
+
+def _queue_entry_sort_key(entry: tuple[MediaFile, Job]) -> tuple[int, float]:
+    media, job = entry
+    status_rank = {"running": 0, "queued": 1, "failed": 2}
+    timestamp = job.started_at or job.created_at or media.updated_at
+    return (status_rank.get(job.status, 9), -timestamp.timestamp())
 
 
 def _current_error_message(job: Job | None, media: MediaFile) -> str | None:
@@ -216,6 +245,11 @@ def _current_error_message(job: Job | None, media: MediaFile) -> str | None:
     if job.status in {"queued", "running"}:
         return None
     return media.error_message
+
+
+def _tasks_paused(request: Request) -> bool:
+    worker_manager = getattr(request.app.state, "worker_manager", None)
+    return bool(worker_manager and worker_manager.is_paused())
 
 
 def _rules_for_request(

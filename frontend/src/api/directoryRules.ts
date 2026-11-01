@@ -1,8 +1,13 @@
 import { apiRequest } from './client';
 import type { DirectoryRule, DirectoryRulePayload } from '../types';
 
-export function listDirectoryRules() {
-  return apiRequest<DirectoryRule[]>('/api/directory-rules');
+export function listDirectoryRules(params: { existingOnly?: boolean } = {}) {
+  const query = new URLSearchParams();
+  if (params.existingOnly) {
+    query.set('existing_only', 'true');
+  }
+  const suffix = query.toString();
+  return apiRequest<DirectoryRule[]>(`/api/directory-rules${suffix ? `?${suffix}` : ''}`);
 }
 
 export function createDirectoryRule(payload: DirectoryRulePayload) {
