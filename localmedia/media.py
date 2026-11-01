@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import subprocess
+import time
 from datetime import datetime
 from fractions import Fraction
 from pathlib import Path
@@ -76,24 +77,61 @@ def ffmpeg(name='ffmpeg'):
     return value
 
 
-def open_image(path):
+class ThumbnailUnavailable(Exception):
+    """A RAW without an embedded preview must wait for standard rendering."""
+
+
+def run_preview_process(args, timeout, cancelled=None):
+    if cancelled is None:
+        return subprocess.run(args, capture_output=True, timeout=timeout, check=True)
+    with subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0)) as process:
+        deadline = time.monotonic() + timeout
+        try:
+            while True:
+                if cancelled():
+                    raise InterruptedError('预览已停止')
+                if time.monotonic() >= deadline:
+                    raise subprocess.TimeoutExpired(args, timeout)
+                try:
+                    stdout, stderr = process.communicate(timeout=.2)
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+            if process.returncode:
+                raise subprocess.CalledProcessError(process.returncode, args, stdout, stderr)
+            return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.communicate()
+
+
+def open_image(path, max_size=None, allow_raw_decode=True):
     suffix = Path(path).suffix.lower()
     if suffix in {'.heic', '.heif'}:
         import pillow_heif
         pillow_heif.register_heif_opener()
     if suffix in {'.arw', '.nef', '.sr2', '.dng', '.cr2', '.cr3'}:
         import rawpy
-        with rawpy.imread(str(path)) as raw:
+        with rawpy.RawPy() as raw:
+            # extract_thumb() unpacks only the embedded image. rawpy.imread()
+            # also unpacks the RAW pixels, which are unnecessary in this path.
+            raw.open_file(str(path))
             try:
                 thumb = raw.extract_thumb()
                 image = Image.open(io.BytesIO(thumb.data)) if thumb.format == rawpy.ThumbFormat.JPEG else Image.fromarray(thumb.data)
-                image.load()
-                return image
             except (rawpy.LibRawNoThumbnailError, rawpy.LibRawUnsupportedThumbnailError):
+                if not allow_raw_decode:
+                    raise ThumbnailUnavailable() from None
                 image = Image.fromarray(raw.postprocess(use_camera_wb=True, output_bps=8))
                 image.info['raw_decoded'] = True
-                return image
-    image = Image.open(path)
+    else:
+        image = Image.open(path)
+    image.info['source_size'] = image.size
+    if max_size:
+        # JPEG decoder scaling avoids materializing all full-resolution pixels.
+        image.draft('RGB', (max_size, max_size))
     image.load()
     return image
 
@@ -121,12 +159,12 @@ def photo_metadata(image):
     return result
 
 
-def make_preview(path, destination, kind, video_decoder='cpu'):
+def make_preview(path, destination, kind, video_decoder='cpu', *, thumbnail=False, cancelled=None):
     destination = Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
     if kind == 'video':
-        probe = subprocess.run([ffmpeg('ffprobe'), '-v', 'error', '-show_format', '-show_streams',
-                                '-of', 'json', str(path)], capture_output=True, timeout=30, check=True)
+        probe = run_preview_process([ffmpeg('ffprobe'), '-v', 'error', '-show_format', '-show_streams',
+                                     '-of', 'json', str(path)], 30, cancelled)
         data = json.loads(probe.stdout)
         stream = next((s for s in data['streams'] if s['codec_type'] == 'video'), None)
         if stream is None:
@@ -154,7 +192,7 @@ def make_preview(path, destination, kind, video_decoder='cpu'):
             last_error = None
             for mode in candidates:
                 try:
-                    subprocess.run(command_at(position, mode), capture_output=True, timeout=60, check=True)
+                    run_preview_process(command_at(position, mode), 60, cancelled)
                     return
                 except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
                     last_error = error
@@ -166,7 +204,7 @@ def make_preview(path, destination, kind, video_decoder='cpu'):
                 raise
             decode(0)
         return meta
-    with open_image(path) as original:
+    with open_image(path, max_size=400 if thumbnail else None, allow_raw_decode=not thumbnail) as original:
         meta = photo_metadata(original)
         raw_dimensions = None
         if Path(path).suffix.lower() in {'.arw', '.nef', '.sr2', '.dng', '.cr2', '.cr3'}:
@@ -194,12 +232,15 @@ def make_preview(path, destination, kind, video_decoder='cpu'):
                 meta['longitude'] = coordinate('GPS GPSLongitude') * (-1 if str(tags['GPS GPSLongitudeRef'])=='W' else 1)
             except (KeyError,TypeError,ValueError,ZeroDivisionError):
                 pass
+        dimensions = original.info.get('source_size', original.size)
+        if original.getexif().get(274) in {5, 6, 7, 8}:
+            dimensions = dimensions[::-1]
         image = ImageOps.exif_transpose(original)
-        meta.update(width=image.width, height=image.height)
+        meta.update(width=dimensions[0], height=dimensions[1])
         if raw_dimensions:
             meta.update(width=raw_dimensions[0],height=raw_dimensions[1])
         icc = image.info.get('icc_profile')
-        if icc:
+        if icc and not thumbnail:
             try:
                 image = ImageCms.profileToProfile(image, ImageCms.ImageCmsProfile(io.BytesIO(icc)),
                                                  ImageCms.createProfile('sRGB'), outputMode='RGB')
@@ -207,9 +248,17 @@ def make_preview(path, destination, kind, video_decoder='cpu'):
                 image = image.convert('RGB')
         else:
             image = image.convert('RGB')
-        image.thumbnail((2000, 2000))
-        image.save(destination, 'JPEG', quality=90)
+        edge = 400 if thumbnail else 2000
+        image.thumbnail((edge, edge))
+        image.save(destination, 'JPEG', quality=75 if thumbnail else 90)
         return meta
+
+
+def thumbnail_from_preview(source, destination):
+    with Image.open(source) as image:
+        image.draft('RGB', (400, 400))
+        image.thumbnail((400, 400))
+        image.convert('RGB').save(destination, 'JPEG', quality=75)
 
 
 def sort_timestamp(meta, fallback):

@@ -8,7 +8,7 @@ const source = readFileSync(new URL('../src/localmedia/uiLogic.ts', import.meta.
 const { outputText } = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2020 },
 });
-const { localDateBoundary, settingsPatch } = await import(
+const { localDateBoundary, settingsPatch, previewUrl } = await import(
   'data:text/javascript;base64,' + Buffer.from(outputText).toString('base64')
 );
 
@@ -45,4 +45,13 @@ test('offline resource changes retain saved models and credentials', () => {
 test('initial offline setup can save local settings before choosing any model', () => {
   assert.deepEqual(settingsPatch({model:'',embedding_model:'',video_frame_mode:'fast'},
     {model:'',embedding_model:'',video_frame_mode:'quality'}), {video_frame_mode:'fast'});
+});
+
+test('grid and detail request distinct tiers and refresh after standard completion', () => {
+  const quick = {id:'photo',preview_version:'123-ready-pending'};
+  const ready = {...quick,preview_version:'123-ready-ready'};
+  assert.match(previewUrl(quick, 'thumbnail'), /tier=thumbnail/);
+  assert.match(previewUrl(quick), /tier=standard/);
+  assert.notEqual(previewUrl(quick), previewUrl(ready));
+  assert.notEqual(previewUrl(quick, 'thumbnail'), previewUrl(ready, 'thumbnail'));
 });

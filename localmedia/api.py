@@ -58,6 +58,12 @@ class RunInput(BaseModel):
     operation: Literal['analysis', 'frames'] = 'analysis'
 
 
+class PreviewPriorityInput(BaseModel):
+    client: str = Field(min_length=1, max_length=128)
+    ids: list[str] = Field(default_factory=list, max_length=200)
+    detail_id: str | None = None
+
+
 # The task log is authoritative, including failures from older app versions.
 # Ignore failures superseded by a newer task or by a manual description edit.
 ANALYSIS_ERROR_SQL = """(
@@ -74,6 +80,7 @@ ANALYSIS_ERROR_SQL = """(
 def analysis_status(row):
     if row.get('analysis_error'):
         row['analysis_state'] = 'failed'
+    row['preview_version'] = f"{row.get('mtime_ns', 0)}-{row.get('thumbnail_state', 'pending')}-{row['preview_state']}"
     return row
 
 
@@ -195,6 +202,7 @@ def create_app(directory=None, background=True, allowed_hosts=None, separate_wor
 
     app = FastAPI(title='LocalMedia', lifespan=lifespan)
     app.state.db, app.state.worker = db, worker
+    app.state.scanner = scanner
     app.add_middleware(
         TrustedHostMiddleware,
         allowed_hosts=allowed_hosts or ['localhost', '127.0.0.1', '[::1]', 'testserver'],
@@ -421,7 +429,7 @@ def create_app(directory=None, background=True, allowed_hosts=None, separate_wor
               offset: int = Query(0, ge=0), limit: int = Query(100, ge=1, le=200)):
         where, args = filters(root_id, parent, kind, status, missing, after, before, q)
         total = db.one('SELECT COUNT(*) AS n FROM media m WHERE ' + where, args)['n']
-        rows = db.rows('SELECT m.id,m.path,m.name,m.description,m.kind,m.sort_time,m.preview_state,m.analysis_state,m.vector_state,m.availability,m.error,' + ANALYSIS_ERROR_SQL + ' AS analysis_error FROM media m WHERE '
+        rows = db.rows('SELECT m.id,m.path,m.name,m.description,m.kind,m.sort_time,m.preview_state,m.thumbnail_state,m.mtime_ns,m.analysis_state,m.vector_state,m.availability,m.error,' + ANALYSIS_ERROR_SQL + ' AS analysis_error FROM media m WHERE '
                        + where + ' ORDER BY m.sort_time DESC,m.id LIMIT ? OFFSET ?', [*args, limit, offset])
         for row in rows:
             row['title'] = display_title(row.pop('description', ''))
@@ -467,11 +475,25 @@ def create_app(directory=None, background=True, allowed_hosts=None, separate_wor
         return FileResponse(path, media_type='image/jpeg')
 
     @app.get('/api/media/{ident}/preview')
-    def preview(ident: str):
+    def preview(ident: str, tier: Literal['thumbnail', 'standard'] = 'standard'):
         row = require_media(ident)
-        if not row['preview'] or not Path(row['preview']).is_file():
-            raise HTTPException(404, row['error'] or '预览尚未生成')
-        return FileResponse(row['preview'], media_type='image/jpeg')
+        candidates = [row['thumbnail'], row['preview']] if tier == 'thumbnail' else [row['preview'], row['thumbnail']]
+        for path in candidates:
+            if path and Path(path).is_file():
+                return FileResponse(path, media_type='image/jpeg', headers={'Cache-Control': 'no-cache'})
+        raise HTTPException(404, row['error'] or '预览尚未生成')
+
+    @app.post('/api/previews/priority')
+    def preview_priority(body: PreviewPriorityInput):
+        ids = list(dict.fromkeys([*body.ids, *([body.detail_id] if body.detail_id else [])]))
+        visible = set()
+        if ids:
+            where, args = filters()
+            visible = {r['id'] for r in db.rows('SELECT m.id FROM media m WHERE ' + where +
+                       ' AND m.id IN (' + ','.join('?' for _ in ids) + ')', [*args, *ids])}
+        scanner.previews.request(body.client, [ident for ident in body.ids if ident in visible],
+                                 body.detail_id if body.detail_id in visible else None)
+        return {'accepted': len(visible)}
 
     @app.get('/api/media/{ident}/original')
     def original(ident: str):
@@ -505,7 +527,7 @@ def create_app(directory=None, background=True, allowed_hosts=None, separate_wor
 
     @app.post('/api/previews/retry')
     def retry_previews():
-        db.execute("UPDATE media SET preview_state='pending',error=NULL WHERE preview_state='failed' AND availability='online'")
+        db.execute("UPDATE media SET preview_state='pending',thumbnail_state=CASE WHEN thumbnail IS NULL THEN 'pending' ELSE thumbnail_state END,error=NULL WHERE preview_state='failed' AND availability='online'")
         scanner.preview_wake.set()
         return {'ok': True}
 
@@ -576,6 +598,8 @@ def create_app(directory=None, background=True, allowed_hosts=None, separate_wor
             run['phases'] = phases
         visible_where, visible_args = filters()
         return {'runs': result, 'quota': worker_client.quota_state() if worker_client else worker.quota_state,
+                'preview_workers': scanner.previews.running,
+                'thumbnails': db.rows('SELECT thumbnail_state AS state,COUNT(*) AS count FROM media m WHERE ' + visible_where + ' GROUP BY thumbnail_state', visible_args),
                 'previews': db.rows('SELECT preview_state AS state,COUNT(*) AS count FROM media m WHERE ' + visible_where + ' GROUP BY preview_state', visible_args),
                 'sync': db.rows('SELECT id,path,enabled,state,error FROM roots'),
                 'vectors': db.rows('SELECT state,COUNT(*) AS count FROM vector_jobs GROUP BY state')}
@@ -697,6 +721,9 @@ def create_app(directory=None, background=True, allowed_hosts=None, separate_wor
         ):
             if key in body and body[key] < 1:
                 raise HTTPException(400, label + '必须为正整数')
+        for key, maximum in [('preview_image_concurrency', 8), ('preview_video_concurrency', 4)]:
+            if key in body and not 1 <= body[key] <= maximum:
+                raise HTTPException(400, f'预览并发数必须为 1 到 {maximum}')
         if 'max_cpu_cores' in body:
             available_cores = os.cpu_count() or 1
             if not 0 <= body['max_cpu_cores'] <= available_cores:
@@ -726,6 +753,7 @@ def create_app(directory=None, background=True, allowed_hosts=None, separate_wor
         for key, value in body.items():
             db.set_setting(key, value)
         db.remember_credentials(merged)
+        scanner.preview_wake.set()
         return db.settings(public=True)
 
     @app.get('/api/services/status')
@@ -846,7 +874,7 @@ def create_app(directory=None, background=True, allowed_hosts=None, separate_wor
             raise HTTPException(502, '向量检索失败，请检查当前向量服务') from None
         if not hits:
             return {'items': [], 'total': 0}
-        rows = db.rows('SELECT m.id,m.path,m.name,m.description,m.kind,m.sort_time,m.preview_state,m.analysis_state,m.vector_state,m.availability,' + ANALYSIS_ERROR_SQL + ' AS analysis_error FROM media m WHERE m.id IN (' + ','.join('?' for _ in hits) + ')', [h[0] for h in hits])
+        rows = db.rows('SELECT m.id,m.path,m.name,m.description,m.kind,m.sort_time,m.preview_state,m.thumbnail_state,m.mtime_ns,m.analysis_state,m.vector_state,m.availability,' + ANALYSIS_ERROR_SQL + ' AS analysis_error FROM media m WHERE m.id IN (' + ','.join('?' for _ in hits) + ')', [h[0] for h in hits])
         for row in rows:
             row['title'] = display_title(row.pop('description', ''))
             analysis_status(row)

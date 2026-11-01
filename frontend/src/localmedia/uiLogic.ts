@@ -1,5 +1,9 @@
 export type SettingsValues = Record<string, string | number | boolean>;
 
+export function previewUrl(media: {id: string; preview_version?: string}, tier: "thumbnail" | "standard" = "standard"): string {
+  return `/api/media/${encodeURIComponent(media.id)}/preview?tier=${tier}&v=${encodeURIComponent(media.preview_version || "")}`;
+}
+
 export function localDateBoundary(value: string, nextDay = false): number {
   const [year, month, day] = value.split("-").map(Number);
   // A date-only ISO string is UTC. Construct local calendar midnight instead;
