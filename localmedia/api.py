@@ -135,7 +135,7 @@ def filters(root_id=None, parent=None, kind=None, status=None, missing=False, af
     return ' AND '.join(where), args
 
 
-def create_app(directory=None, background=True, allowed_hosts=None, separate_worker=False):
+def create_app(directory=None, background=True, allowed_hosts=None, separate_worker=False, lightroom=None):
     db = Database(Path(directory or os.environ.get('LOCALMEDIA_DATA', 'data/localmedia-v2')))
     tasks, scanner, index = Tasks(db), Scanner(db), VectorIndex(db)
     worker = Worker(db, tasks)
@@ -880,6 +880,11 @@ def create_app(directory=None, background=True, allowed_hosts=None, separate_wor
             analysis_status(row)
         mapping = {r['id']: r for r in rows}
         return {'items': [{**mapping[ident], 'score': score} for ident, score in hits if ident in mapping], 'total': len(hits)}
+
+    if lightroom is not None:
+        from .lightroom_bridge import install_bridge
+        install_bridge(app, db, scanner, lightroom,
+                       lambda ids, ack: create_run(RunInput(ids=ids, cloud_ack=ack)), search, ANALYSIS_ERROR_SQL)
 
     static = Path(__file__).parent / 'static'
     if static.is_dir():

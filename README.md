@@ -6,6 +6,8 @@
 >
 > 以下为保留的旧版说明；新版不需要 MySQL，也不需要分别启动前后端。
 
+Windows Lightroom 用户可试用 [图库一键切换与 AI 插件](docs/LIGHTROOM.md)：独立 Catalog 分开加载，编辑后预览分析，以及自然语言搜索回 LR 集合。
+
 本地 AI 媒体记忆库。首轮 MVP 面向 Windows，本机运行后端和 Web UI，扫描图片和视频目录，生成缩略图，调用本地 Ollama 视觉模型生成摘要，再用 Ollama embedding + MySQL JSON 向量做语义搜索。
 
 ## 当前范围

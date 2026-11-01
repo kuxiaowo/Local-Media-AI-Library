@@ -39,6 +39,22 @@ secrets.*.json
 *.log.*
 *.dump
 *.bak
+*.lrcat
+*.lrcat-*
+*.lrcat.*
+*.lrdata/
+*.vhd
+*.vhdx
+*.hc
+*.vault.json
+*.dpapi
+/tools/lightroom_vault/Acceptance.lrplugin/AcceptanceConfig.lua
+/tools/lightroom_vault/Acceptance.lrplugin/LocalMaskFixture.lua
+/plugins/LocalMedia.lrplugin/Config.lua
+*.lightroom.json
+# Superseded encryption prototype and machine-specific acceptance harness.
+/tools/lightroom_vault/
+/tools/lightroom/sdk_test_client.py
 data/
 cache/
 logs/
