@@ -1,14 +1,54 @@
 .venv/
+venv/
 __pycache__/
 .pytest_cache/
+.pytest*/
 .mypy_cache/
 .ruff_cache/
 *.pyc
 *.pyo
 *.egg-info/
 
-backend/.env
-backend/data/
+# Local credentials and machine-specific settings. Only sanitized examples belong in Git.
+.env
+.env.*
+!.env.example
+!.env.*.example
+auth.json
+credentials.json
+credentials.*.json
+secrets.json
+secrets.*.json
+*.pem
+*.key
+*.p12
+*.pfx
+*.keystore
+*.jks
+.idea/
+.vscode/
+
+# Databases and diagnostic output may include paths, notes, prompts, and credentials.
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.log
+*.log.*
+*.dump
+*.bak
+data/
+cache/
+logs/
+backups/
+exports/
+private/
+media/
+previews/
+video_frames/
+visual-reference-pack/
 
 frontend/node_modules/
 frontend/dist/
@@ -19,3 +59,56 @@ frontend/vite.config.d.ts
 
 .DS_Store
 Thumbs.db
+
+# Original media, previews, and screenshots are local-only. Add an explicit
+# exception for any future public UI asset or synthetic test fixture.
+*.[jJ][pP][gG]
+*.[jJ][pP][eE][gG]
+*.[pP][nN][gG]
+*.[wW][eE][bB][pP]
+*.[bB][mM][pP]
+*.[tT][iI][fF]
+*.[tT][iI][fF][fF]
+*.[gG][iI][fF]
+*.[hH][eE][iI][cC]
+*.[hH][eE][iI][fF]
+*.[aA][rR][wW]
+*.[nN][eE][fF]
+*.[sS][rR]2
+*.[dD][nN][gG]
+*.[cC][rR]2
+*.[cC][rR]3
+*.[jJ][xX][rR]
+*.[mM][pP]4
+*.[mM][oO][vV]
+*.[mM][kK][vV]
+*.[aA][vV][iI]
+*.[wW][eE][bB][mM]
+*.[mM]4[vV]
+*.[mM][tT][sS]
+*.[mM]2[tT][sS]
+*.3[gG][pP]
+*.[mM][oO][dD]
+*.[mM][pP][gG]
+*.[mM][pP][eE][gG]
+*.[wW][mM][vV]
+*.[mM][pP]3
+*.[wW][aA][vV]
+*.[mM]4[aA]
+*.[fF][lL][aA][cC]
+*.[oO][gG][gG]
+*.[aA][aA][cC]
+
+# Personal library exports, real-media annotations, and local acceptance evidence.
+/kbsm_*
+/docs/ACCEPTANCE-V2.md
+/docs/HARDWARE-DECODE-BENCHMARK-*.md
+/scripts/evaluate_visual_prompts.py
+/scripts/localmedia_query_evaluation.py
+/scripts/localmedia_cloud_smoke.py
+
+# LocalMedia development snapshots and generated frontend bundles.
+work/
+.codex-tmp/
+localmedia/static/
+localmedia-ui/node_modules/
