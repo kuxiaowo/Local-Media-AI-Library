@@ -14,6 +14,15 @@ class Paused(Exception):
     pass
 
 
+def pending_source_matches(config, media):
+    """An unbound task may adopt its first hash only for the original file version."""
+    if 'source_size' in config and 'source_mtime_ns' in config:
+        return (config['source_size'], config['source_mtime_ns']) == (media['size'], media['mtime_ns'])
+    # Older task snapshots did not include a file fingerprint. Fail closed when
+    # their source/description revision has changed rather than accepting new data.
+    return config.get('source_revision') == media['revision']
+
+
 class Tasks:
     def __init__(self, db):
         self.db = db
@@ -87,6 +96,8 @@ class Tasks:
                         and (Path(r['path']) == directory or Path(r['path']) in directory.parents)]
                 snapshot['background_chain'] = chains[row['parent']]
                 snapshot['source_revision'] = row['revision']
+                snapshot['source_size'] = row['size']
+                snapshot['source_mtime_ns'] = row['mtime_ns']
                 conn.execute('INSERT INTO tasks(id,run_id,media_id,source_hash,config,updated) VALUES (?,?,?,?,?,?)',
                              (str(uuid.uuid4()), run_id, media_id, row['hash'], json.dumps(snapshot, ensure_ascii=False), now))
             if not conn.execute('SELECT 1 FROM tasks WHERE run_id=?', (run_id,)).fetchone():
@@ -105,7 +116,8 @@ class Tasks:
     def resume(self, run_id):
         budget = self.db.settings()['video_budget']
         with self.db.connect() as conn:
-            for task in conn.execute("SELECT t.*,m.hash,m.kind,m.availability FROM tasks t JOIN media m ON m.id=t.media_id WHERE run_id=? AND t.state='paused'", (run_id,)).fetchall():
+            conn.execute('BEGIN IMMEDIATE')
+            for task in conn.execute("SELECT t.*,m.hash,m.kind,m.availability,m.size,m.mtime_ns,m.revision FROM tasks t JOIN media m ON m.id=t.media_id WHERE run_id=? AND t.state='paused'", (run_id,)).fetchall():
                 newer = conn.execute("SELECT 1 FROM tasks WHERE media_id=? AND id<>? AND (state IN ('queued','running') OR (state='completed' AND updated>?)) LIMIT 1", (task['media_id'],task['id'],task['updated'])).fetchone()
                 if newer:
                     conn.execute("UPDATE tasks SET state='failed',error='已有更新的分析任务，旧任务不能覆盖新结果' WHERE id=?", (task['id'],))
@@ -118,7 +130,9 @@ class Tasks:
                     continue
                 if task['availability'] != 'online':
                     continue
-                if task['source_hash'] != task['hash']:
+                source_matches = (pending_source_matches(config, task) if task['source_hash'] is None
+                                  else task['source_hash'] == task['hash'])
+                if not source_matches:
                     conn.execute("UPDATE tasks SET state='failed',error='媒体内容改变，请重新分析' WHERE id=?", (task['id'],))
                     continue
                 if task['reason'] == 'source_changed':
@@ -126,7 +140,7 @@ class Tasks:
                     continue
                 if task['kind'] == 'video' and budget and task['elapsed'] >= budget:
                     continue
-                conn.execute("UPDATE tasks SET state='queued',reason=NULL,error=NULL WHERE id=?", (task['id'],))
+                conn.execute("UPDATE tasks SET state='queued',source_hash=COALESCE(source_hash,?),reason=NULL,error=NULL WHERE id=?", (task['hash'], task['id']))
             if conn.execute("SELECT 1 FROM tasks WHERE run_id=? AND state='queued'", (run_id,)).fetchone():
                 conn.execute("UPDATE runs SET state='running',reason=NULL WHERE id=?", (run_id,))
 

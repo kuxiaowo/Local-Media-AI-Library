@@ -31,6 +31,7 @@ import {
 } from "lucide-react";
 import "./style.css";
 import { useGamepad } from "./useGamepad";
+import { localDateBoundary, settingsPatch } from "./uiLogic";
 
 type Media = {
   title?: string;
@@ -40,6 +41,7 @@ type Media = {
   sort_time: number;
   preview_state: string;
   analysis_state: string;
+  analysis_error?: string | null;
   vector_state: string;
   availability: string;
   error?: string;
@@ -238,9 +240,9 @@ function App() {
   if (status) params.set("status", status);
   if (missing) params.set("missing", "true");
   if (search) params.set("q", search);
-  if (after) params.set("after", String(new Date(after).getTime() / 1000));
+  if (after) params.set("after", String(localDateBoundary(after)));
   if (before)
-    params.set("before", String(new Date(before).getTime() / 1000 + 86400));
+    params.set("before", String(localDateBoundary(before, true)));
   const filterKey = params.toString();
   const act = async (fn: () => Promise<unknown>, message?: string) => {
     try {
@@ -831,6 +833,7 @@ function App() {
             <option value="pending">未分析</option>
             <option value="stale">待重新分析</option>
             <option value="done">已分析</option>
+            <option value="failed">分析失败</option>
           </select>
           <input
             aria-label="拍摄开始日期"
@@ -964,6 +967,11 @@ function App() {
                               <Sparkles size={12} />
                             </span>
                           )}
+                          {m.analysis_error && (
+                            <span className="analysis-failure" title={m.analysis_error}>
+                              <AlertCircle size={13} />分析失败
+                            </span>
+                          )}
                         </div>
                         <div className="caption">
                           <strong title={m.name}>{m.title || m.name}</strong>
@@ -1030,6 +1038,7 @@ function App() {
                 <span>{label(detail.analysis_state)}</span>
                 <span>向量 {label(detail.vector_state)}</span>
               </div>
+              {detail.analysis_error && <p className="failure-message" role="alert">最近分析失败：{detail.analysis_error}</p>}
               {detail.preview_state === "failed" && (
                 <button
                   onClick={() =>
@@ -1504,6 +1513,7 @@ function App() {
               <div className="section-label">媒体背景备注</div>
               <p className="description">{detail.note || "暂无备注"}</p>
               <div className="section-label">AI 描述</div>
+              {detail.analysis_error && <p className="failure-message" role="alert">最近分析失败：{detail.analysis_error}</p>}
               <p className="description">{detail.description || "尚未生成描述"}</p>
               {detail.kind === "video" && <>
                 <div className="section-label">本次全部抽帧 · {detail.frames?.length || 0} 张</div>
@@ -1604,26 +1614,29 @@ function Modal({
   );
 }
 function TaskDetails({ id }: { id: string }) {
-  type RunningTask = {
+  type TaskProgress = {
     id: string;
     name: string;
     kind: "image" | "video";
     elapsed: number;
     operation: "analysis" | "frames";
-    state: "queued" | "running";
+    state: "queued" | "running" | "paused" | "failed";
+    reason?: string | null;
+    error?: string | null;
     stage?: "extract_queued" | "extracting" | "ai_queued" | "ai" | "processing";
     batch?: { current: number; total: number } | null;
     extraction?: { percent: number; completed_duration: number; total_duration: number } | null;
   };
-  const [data, setData] = useState<RunningTask[]>([]);
+  const [data, setData] = useState<TaskProgress[]>([]);
+  const [loadError, setLoadError] = useState("");
   const [open, setOpen] = useState(false);
   useEffect(() => {
     if (!open) return;
     let active = true;
     const refresh = () =>
-      void api<RunningTask[]>("/runs/" + id + "/tasks").then((rows) => {
-        if (active) setData(rows);
-      });
+      void api<TaskProgress[]>("/runs/" + id + "/tasks").then((rows) => {
+        if (active) { setData(rows); setLoadError(""); }
+      }).catch((cause) => { if (active) setLoadError((cause as Error).message); });
     refresh();
     const timer = window.setInterval(refresh, 1000);
     return () => {
@@ -1637,12 +1650,15 @@ function TaskDetails({ id }: { id: string }) {
         setOpen(e.currentTarget.open);
       }}
     >
-      <summary>查看当前文件进度</summary>
-      {data.length === 0 && <p>当前没有排队或正在运行的文件</p>}
+      <summary>查看文件进度与失败原因</summary>
+      {loadError && <p className="failure-message" role="alert">{loadError}</p>}
+      {!loadError && data.length === 0 && <p>当前没有排队、运行、暂停或失败的文件</p>}
       {data.map((t) => (
         <p key={t.id}>
-          {t.name} · {t.state === "queued" ? "排队中" : `已运行 ${Math.round(t.elapsed)} 秒`}
-          {t.kind === "video" && (
+          {t.name} · {label(t.state)} · 已处理 {Math.round(t.elapsed)} 秒
+          {t.reason && ` · ${label(t.reason)}`}
+          {t.error && <span className="failure-message"> · {t.error}</span>}
+          {t.kind === "video" && (t.state === "queued" || t.state === "running") && (
             <> · {t.extraction ? `抽帧 ${t.extraction.percent}%` : "抽帧准备中"}
               {t.operation === "analysis" && ` · ${t.batch ? `AI 批次 ${t.batch.current}/${t.batch.total}` : t.stage === "ai" ? "AI 分析中" : t.stage === "ai_queued" ? "AI 排队中" : "AI 等待抽帧"}`}</>
           )}
@@ -1690,13 +1706,6 @@ function SettingsDialog({
       (embedding?setEmbeddingModels:setModels)(result.models);
       if(!embedding)setLoggedIn(result.logged_in??null);
       setMessage(result.message);
-      setForm(previous=>{
-        const next={...previous};
-        const allowed=(id:unknown,cap:'vision'|'text'|'embedding')=>result.models.some(m=>m.id===id&&m[cap]!==false);
-        if(embedding){if(!allowed(next.embedding_model,'embedding'))next.embedding_model='';}
-        else {if(!allowed(next.model,'vision'))next.model='';if(next.summary_model&&!allowed(next.summary_model,'text'))next.summary_model='';}
-        return next;
-      });
     } catch(e){if(generation===discoveryGeneration.current[target])setMessage((e as Error).message);}
     finally{if(generation===discoveryGeneration.current[target])setLoading(false);}
   };
@@ -1710,33 +1719,28 @@ function SettingsDialog({
     const timer=setTimeout(()=>void discover('embedding'),450);
     return()=>{clearTimeout(timer);++discoveryGeneration.current.embedding;};
   },[form.embedding_provider,form.embedding_url,form.embedding_key]);
-  useEffect(()=>{
-    if(form.provider!=='codex'||loadingModels||!models.length)return;
-    setForm(previous=>{
-      const next={...previous};
-      for(const [key,modelId] of [['codex_effort',previous.model],['codex_summary_effort',previous.summary_model||previous.model]]){
-        const model=models.find(m=>m.id===modelId);
-        if(next[key as string]&&!model?.efforts?.some(e=>e.value===next[key as string]))next[key as string]='';
-      }
-      return next;
-    });
-  },[form.provider,form.model,form.summary_model,models,loadingModels]);
   const effortField=(key:string,title:string,modelId:unknown)=>{
     if(form.provider!=='codex')return null;
     const model=models.find(m=>m.id===modelId);
     const efforts=model?.efforts??[];
-    return <label>{title}<select value={efforts.some(e=>e.value===form[key])?String(form[key]):''}
+    const selected = String(form[key] || '');
+    return <label>{title}<select value={selected}
       disabled={loadingModels||!efforts.length} onChange={e=>setForm({...form,[key]:e.target.value})}>
       <option value="">模型默认{model?.default_effort?`（${model.default_effort}）`:''}</option>
+      {selected && !efforts.some(e=>e.value===selected) && <option value={selected}>{selected}（已保存，待验证）</option>}
       {efforts.map(e=><option key={e.value} value={e.value} title={e.description}>{e.value}</option>)}
     </select></label>;
   };
   const modelField=(key:string,title:string,cap:'vision'|'text'|'embedding',inherit=false)=>{
     const list=(cap==='embedding'?embeddingModels:models).filter(m=>m[cap]!==false);
     const loading=cap==='embedding'?loadingEmbeddings:loadingModels;
-    const selected=list.some(m=>m.id===form[key])?String(form[key]):'';
-    return <label>{title}<select value={selected} disabled={loading||!list.length} onChange={e=>setForm({...form,[key]:e.target.value})}>
+    const selected=String(form[key] || '');
+    return <label>{title}<select value={selected} disabled={loading||!list.length} onChange={e=>setForm(previous=>({
+      ...previous,[key]:e.target.value,
+      ...(key==='model'?{codex_effort:''}:key==='summary_model'?{codex_summary_effort:''}:{}),
+    }))}>
       <option value="">{loading?'正在获取模型…':inherit?'沿用视觉描述模型':list.length?'请选择模型':'没有可用模型'}</option>
+      {selected && !list.some(m=>m.id===selected) && <option value={selected}>{selected}（已保存，待验证）</option>}
       {list.map(m=><option key={m.id} value={m.id}>{m.label===m.id?m.id:`${m.label} (${m.id})`}</option>)}
     </select></label>;
   };
@@ -1761,18 +1765,9 @@ function SettingsDialog({
     </label>
   );
   const persist = async () => {
-    if(loadingModels||loadingEmbeddings)throw new Error('请等待模型列表加载完成');
-    if(!models.some(m=>m.id===form.model&&m.vision!==false))throw new Error('请从可用列表选择视觉描述模型');
-    if(form.summary_model&&!models.some(m=>m.id===form.summary_model&&m.text!==false))throw new Error('请选择可用的汇总模型');
-    if(!embeddingModels.some(m=>m.id===form.embedding_model&&m.embedding!==false))throw new Error('请从可用列表选择向量模型');
-    const body: Config = {};
-    for (const [key, value] of Object.entries(form)) {
-      if (key.endsWith("_configured") || key === "active_profile") continue;
-      if ((key === "api_key" || key === "embedding_key") && !value) continue;
-      if (Object.is(value, config[key])) continue;
-      body[key] = value;
-    }
-    await save(body);
+    // Connection discovery is advisory. Offline services must not prevent local
+    // resource/frame settings or connection details from being saved.
+    await save(settingsPatch(form, config));
   };
   const action = async (fn: () => Promise<void>) => {
     setBusy(true);

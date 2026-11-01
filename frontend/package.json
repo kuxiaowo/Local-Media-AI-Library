@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "test:localmedia": "node --test tests/localmedia-ui.test.mjs",
     "build:localmedia": "tsc -p tsconfig.localmedia.json && vite build --config vite.localmedia.config.ts && node scripts/finalize-localmedia.mjs",
     "dev": "vite --host 0.0.0.0",
     "build": "tsc -b && vite build",

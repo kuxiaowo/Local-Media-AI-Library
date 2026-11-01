@@ -3,6 +3,23 @@
   grid-template-columns: 1fr 1fr;
   gap: 8px;
 }
+.analysis-failure {
+  position: absolute;
+  bottom: 7px;
+  left: 7px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 7px;
+  border-radius: 4px;
+  background: #542728;
+  color: #ffd4cf;
+  font-size: 12px;
+}
+.failure-message {
+  color: #ffb4aa;
+  overflow-wrap: anywhere;
+}
 .representatives figure {
   margin: 0;
 }

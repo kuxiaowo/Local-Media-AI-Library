@@ -356,6 +356,8 @@ class Worker:
         config = json.loads(task['config'])
         cp = json.loads(task['checkpoint'])
         media = self.db.one('SELECT * FROM media WHERE id=?', (task['media_id'],))
+        if config.get('source_revision') != media['revision']:
+            raise ProviderError('描述或媒体已在任务创建后修改，已保留当前结果；请重新创建分析任务')
         if media['preview_state'] != 'ready':
             raise ProviderError('预览尚未就绪，请完成预览后重试')
         digest = await asyncio.to_thread(file_hash, media['path'])
@@ -428,30 +430,46 @@ class Worker:
             if not cp['description'].strip():
                 raise ProviderError('模型返回空描述')
             self.tasks.checkpoint(task['id'], cp, 0)
-        if 'vector' not in cp:
-            cp['vector'] = normalize(await self.stage(
-                task, cp, lambda: self.providers.embed(config, cp['description']),
-                resource='embedding_request_concurrency', label='Ollama 向量生成')).tolist()
-            self.tasks.checkpoint(task['id'], cp, 0)
-        self.tasks.boundary(task['id'])
-        if await asyncio.to_thread(file_hash, media['path']) != task['source_hash']:
-            raise ProviderError('处理期间媒体内容改变，请重新分析')
-        vector = normalize(cp['vector'])
-        active = self.db.settings()['active_profile']
-        with self.db.connect() as conn:
-            current = conn.execute('SELECT revision,hash FROM media WHERE id=?', (media['id'],)).fetchone()
-            if current['hash'] != task['source_hash']:
-                raise ProviderError('处理期间媒体内容改变')
-            revision = current['revision'] + 1
-            conn.execute("UPDATE media SET description=?,revision=?,analysis_state='done',vector_state='ready' WHERE id=?",
-                         (cp['description'], revision, media['id']))
-            conn.execute('DELETE FROM vectors WHERE media_id=?', (media['id'],))
-            conn.execute('DELETE FROM vector_jobs WHERE media_id=?', (media['id'],))
-            conn.execute('INSERT INTO vectors VALUES (?,?,?,?,?)', (media['id'], profile(config), revision, len(vector), vector.tobytes()))
-            enqueue_rebuilds(conn, media['id'], revision)
-            conn.execute("UPDATE tasks SET state='completed',reason=NULL,error=NULL WHERE id=?", (task['id'],))
-            if not active:
-                conn.execute("UPDATE settings SET value=? WHERE key='active_profile'", (json.dumps(profile(config)),))
+        while True:
+            # Description settings stay frozen, but a rebuilt embedding space may
+            # have become active while this task was queued or awaiting the model.
+            space = self.db.settings()['active_profile'] or profile(config)
+            if 'vector' not in cp or cp.get('vector_profile', profile(config)) != space:
+                provider, url, model = json.loads(space)
+                embedding_config = {**config, 'embedding_provider': provider,
+                                    'embedding_url': url, 'embedding_model': model}
+                cp['vector'] = normalize(await self.stage(
+                    task, cp, lambda: self.providers.embed(embedding_config, cp['description']),
+                    resource='embedding_request_concurrency', label='向量生成')).tolist()
+                cp['vector_profile'] = space
+                self.tasks.checkpoint(task['id'], cp, 0)
+            self.tasks.boundary(task['id'])
+            if await asyncio.to_thread(file_hash, media['path']) != task['source_hash']:
+                raise ProviderError('处理期间媒体内容改变，请重新分析')
+            vector = normalize(cp['vector'])
+            with self.db.connect() as conn:
+                # Serialize the revision/profile check with description edits and
+                # rebuild completion. No network calls run inside this transaction.
+                conn.execute('BEGIN IMMEDIATE')
+                current = conn.execute('SELECT revision,hash FROM media WHERE id=?', (media['id'],)).fetchone()
+                if not current or current['hash'] != task['source_hash']:
+                    raise ProviderError('处理期间媒体内容改变')
+                if current['revision'] != config.get('source_revision'):
+                    raise ProviderError('描述或媒体已在任务创建后修改，已保留当前结果；请重新创建分析任务')
+                active = json.loads(conn.execute("SELECT value FROM settings WHERE key='active_profile'").fetchone()['value'])
+                if active and active != space:
+                    continue
+                revision = current['revision'] + 1
+                conn.execute("UPDATE media SET description=?,revision=?,analysis_state='done',vector_state='ready' WHERE id=?",
+                             (cp['description'], revision, media['id']))
+                conn.execute('DELETE FROM vectors WHERE media_id=?', (media['id'],))
+                conn.execute('DELETE FROM vector_jobs WHERE media_id=?', (media['id'],))
+                conn.execute('INSERT INTO vectors VALUES (?,?,?,?,?)', (media['id'], space, revision, len(vector), vector.tobytes()))
+                enqueue_rebuilds(conn, media['id'], revision)
+                conn.execute("UPDATE tasks SET state='completed',reason=NULL,error=NULL WHERE id=?", (task['id'],))
+                if not active:
+                    conn.execute("UPDATE settings SET value=? WHERE key='active_profile'", (json.dumps(space),))
+            return
 
     async def extract_frames(self, task):
         config = json.loads(task['config'])
@@ -486,13 +504,17 @@ class Worker:
             async with self.resource_slot('ai_request_concurrency'):
                 vector = normalize(await self.providers.embed(config, media['description']))
             with self.db.connect() as conn:
+                conn.execute('BEGIN IMMEDIATE')
                 current = conn.execute('SELECT revision FROM media WHERE id=?', (media['id'],)).fetchone()
                 if current and current['revision'] == job['revision']:
                     conn.execute('INSERT OR REPLACE INTO vectors VALUES (?,?,?,?,?)', (media['id'], job['profile'], job['revision'], len(vector), vector.tobytes()))
-                    conn.execute("UPDATE media SET vector_state='ready' WHERE id=?", (media['id'],))
-                    active = conn.execute("SELECT value FROM settings WHERE key='active_profile'").fetchone()
-                    if not json.loads(active['value']):
+                    active = json.loads(conn.execute("SELECT value FROM settings WHERE key='active_profile'").fetchone()['value'])
+                    if not active:
                         conn.execute("UPDATE settings SET value=? WHERE key='active_profile'", (json.dumps(job['profile']),))
+                        active = job['profile']
+                    if conn.execute('SELECT 1 FROM vectors WHERE media_id=? AND profile=? AND revision=?',
+                                    (media['id'], active, job['revision'])).fetchone():
+                        conn.execute("UPDATE media SET vector_state='ready' WHERE id=?", (media['id'],))
                 conn.execute('DELETE FROM vector_jobs WHERE media_id=? AND profile=? AND revision=?', (media['id'], job['profile'], job['revision']))
         except Exception as exc:
             self.db.execute("UPDATE vector_jobs SET state='failed',error=? WHERE media_id=? AND profile=? AND revision=?",
@@ -512,6 +534,7 @@ class Worker:
                 if missing:
                     continue
                 conn.execute("UPDATE settings SET value=? WHERE key='active_profile'", (json.dumps(rebuild['profile']),))
+                conn.execute("UPDATE media SET vector_state='ready' WHERE description<>''")
                 conn.execute("UPDATE rebuilds SET state='completed' WHERE profile=?", (rebuild['profile'],))
 
     async def execute(self, item, vector=False):

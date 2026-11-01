@@ -9,6 +9,7 @@ import uuid
 from pathlib import Path
 
 from .media import IMAGES, VIDEOS, file_hash, make_preview, normalized, sort_timestamp
+from .tasks import pending_source_matches
 
 
 class Scanner:
@@ -161,6 +162,7 @@ class Scanner:
             self.wake.set()
             return False
         with self.db.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
             current = db.execute(
                 "SELECT * FROM media WHERE id=? AND availability='online' AND hash IS NULL",
                 (row['id'],),
@@ -168,8 +170,11 @@ class Scanner:
             if not current or (current['size'], current['mtime_ns']) != (row['size'], row['mtime_ns']):
                 return True
             db.execute('UPDATE media SET hash=? WHERE id=?', (digest, row['id']))
-            db.execute("UPDATE tasks SET source_hash=? WHERE media_id=? AND source_hash IS NULL AND state='queued'",
-                       (digest, row['id']))
+            for task in db.execute("SELECT id,config FROM tasks WHERE media_id=? AND source_hash IS NULL AND state='queued'", (row['id'],)).fetchall():
+                if pending_source_matches(json.loads(task['config']), current):
+                    db.execute('UPDATE tasks SET source_hash=? WHERE id=?', (digest, task['id']))
+                else:
+                    db.execute("UPDATE tasks SET state='failed',reason='source_changed',error='媒体内容改变，请重新分析' WHERE id=?", (task['id'],))
         self.reconcile_identity(digest, row['size'])
         return True
 
@@ -250,9 +255,11 @@ class Scanner:
                     if moved and Path(moved['path']).exists():
                         moved = None
                     if moved:
+                        # Keep the old fingerprint until visit() has compared it
+                        # with the file at its new path, including edits before a move.
                         self.db.execute(
-                            "UPDATE media SET root_id=?,path=?,parent=?,name=?,size=?,mtime_ns=?,availability='online',updated=? WHERE id=?",
-                            (root['id'], key, normalized(path.parent), path.name, stat.st_size, stat.st_mtime_ns,
+                            "UPDATE media SET root_id=?,path=?,parent=?,name=?,availability='online',updated=? WHERE id=?",
+                            (root['id'], key, normalized(path.parent), path.name,
                              time.time(), moved['id']))
                         current = self.db.one('SELECT * FROM media WHERE id=?', (moved['id'],))
                     else:

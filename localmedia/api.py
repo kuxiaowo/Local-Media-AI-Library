@@ -58,6 +58,25 @@ class RunInput(BaseModel):
     operation: Literal['analysis', 'frames'] = 'analysis'
 
 
+# The task log is authoritative, including failures from older app versions.
+# Ignore failures superseded by a newer task or by a manual description edit.
+ANALYSIS_ERROR_SQL = """(
+    SELECT CASE WHEN t.state='failed'
+        AND (json_extract(t.config,'$.source_revision') IS NULL
+             OR json_extract(t.config,'$.source_revision')=m.revision)
+        THEN COALESCE(NULLIF(t.error,''),'分析失败，请重试') END
+    FROM tasks t JOIN runs r ON r.id=t.run_id
+    WHERE t.media_id=m.id AND r.kind='analysis'
+    ORDER BY t.rowid DESC LIMIT 1
+)"""
+
+
+def analysis_status(row):
+    if row.get('analysis_error'):
+        row['analysis_state'] = 'failed'
+    return row
+
+
 def display_title(description):
     lines = [line.strip() for line in (description or '').splitlines() if line.strip()]
     if not lines:
@@ -83,10 +102,14 @@ def filters(root_id=None, parent=None, kind=None, status=None, missing=False, af
     if root_id:
         where.append("m.root_id IN (SELECT child.id FROM roots child JOIN roots ancestor ON ancestor.id=? WHERE child.id=ancestor.id OR substr(child.path,1,length(rtrim(ancestor.path,'/\\'))+1)=rtrim(ancestor.path,'/\\') || ?)")
         args.extend([root_id, os.sep])
-    for name, value in [('kind', kind), ('analysis_state', status)]:
-        if value:
-            where.append(f'm.{name}=?')
-            args.append(value)
+    if kind:
+        where.append('m.kind=?')
+        args.append(kind)
+    if status == 'failed':
+        where.append(ANALYSIS_ERROR_SQL + ' IS NOT NULL')
+    elif status:
+        where.extend(['m.analysis_state=?', ANALYSIS_ERROR_SQL + ' IS NULL'])
+        args.append(status)
     if parent:
         prefix = parent.rstrip('/\\') + os.sep
         escaped = prefix.replace('\\','\\\\').replace('%','\\%').replace('_','\\_')
@@ -398,15 +421,18 @@ def create_app(directory=None, background=True, allowed_hosts=None, separate_wor
               offset: int = Query(0, ge=0), limit: int = Query(100, ge=1, le=200)):
         where, args = filters(root_id, parent, kind, status, missing, after, before, q)
         total = db.one('SELECT COUNT(*) AS n FROM media m WHERE ' + where, args)['n']
-        rows = db.rows('SELECT m.id,m.path,m.name,m.description,m.kind,m.sort_time,m.preview_state,m.analysis_state,m.vector_state,m.availability,m.error FROM media m WHERE '
+        rows = db.rows('SELECT m.id,m.path,m.name,m.description,m.kind,m.sort_time,m.preview_state,m.analysis_state,m.vector_state,m.availability,m.error,' + ANALYSIS_ERROR_SQL + ' AS analysis_error FROM media m WHERE '
                        + where + ' ORDER BY m.sort_time DESC,m.id LIMIT ? OFFSET ?', [*args, limit, offset])
         for row in rows:
             row['title'] = display_title(row.pop('description', ''))
+            analysis_status(row)
         return {'total': total, 'items': rows}
 
     @app.get('/api/media/{ident}')
     def detail(ident: str):
         row = require_media(ident)
+        row.update(db.one('SELECT ' + ANALYSIS_ERROR_SQL + ' AS analysis_error FROM media m WHERE m.id=?', (ident,)))
+        analysis_status(row)
         row['title'] = display_title(row['description'])
         row['metadata'] = json.loads(row['metadata'])
         batches = db.one("SELECT checkpoint FROM tasks WHERE media_id=? AND state='completed' ORDER BY updated DESC LIMIT 1", (ident,))
@@ -487,11 +513,12 @@ def create_app(directory=None, background=True, allowed_hosts=None, separate_wor
     def description(ident: str, body: TextInput):
         require_media(ident)
         config = db.settings()
-        active = config['active_profile']
-        if active:
-            provider, url, model = json.loads(active)
-            config.update(embedding_provider=provider, embedding_url=url, embedding_model=model)
         with db.connect() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            active = json.loads(conn.execute("SELECT value FROM settings WHERE key='active_profile'").fetchone()['value'])
+            if active:
+                provider, url, model = json.loads(active)
+                config.update(embedding_provider=provider, embedding_url=url, embedding_model=model)
             conn.execute("UPDATE media SET description=?,revision=revision+1,analysis_state='done',vector_state='pending' WHERE id=?", (body.text, ident))
             conn.execute('DELETE FROM vectors WHERE media_id=?', (ident,))
             revision = conn.execute('SELECT revision FROM media WHERE id=?', (ident,)).fetchone()['revision']
@@ -568,9 +595,9 @@ def create_app(directory=None, background=True, allowed_hosts=None, separate_wor
     def run_tasks(ident: str):
         now = time.time()
         rows = db.rows(
-            "SELECT t.id,t.media_id,m.name,m.kind,m.metadata,r.kind AS operation,t.state,t.elapsed,t.updated,t.config,t.checkpoint "
+            "SELECT t.id,t.media_id,m.name,m.kind,m.metadata,r.kind AS operation,t.state,t.reason,t.error,t.elapsed,t.updated,t.config,t.checkpoint "
             "FROM tasks t JOIN media m ON m.id=t.media_id JOIN runs r ON r.id=t.run_id "
-            "WHERE t.run_id=? AND t.state IN ('queued','running') ORDER BY t.rowid",
+            "WHERE t.run_id=? AND t.state IN ('queued','running','paused','failed') ORDER BY t.rowid",
             (ident,),
         )
         result = []
@@ -582,6 +609,8 @@ def create_app(directory=None, background=True, allowed_hosts=None, separate_wor
                 'kind': row['kind'],
                 'operation': row['operation'],
                 'state': row['state'],
+                'reason': row['reason'],
+                'error': row['error'],
                 'elapsed': row['elapsed'] + (max(0, now - row['updated']) if row['state'] == 'running' else 0),
             }
             try:
@@ -817,9 +846,10 @@ def create_app(directory=None, background=True, allowed_hosts=None, separate_wor
             raise HTTPException(502, '向量检索失败，请检查当前向量服务') from None
         if not hits:
             return {'items': [], 'total': 0}
-        rows = db.rows('SELECT id,path,name,description,kind,sort_time,preview_state,analysis_state,vector_state,availability FROM media WHERE id IN (' + ','.join('?' for _ in hits) + ')', [h[0] for h in hits])
+        rows = db.rows('SELECT m.id,m.path,m.name,m.description,m.kind,m.sort_time,m.preview_state,m.analysis_state,m.vector_state,m.availability,' + ANALYSIS_ERROR_SQL + ' AS analysis_error FROM media m WHERE m.id IN (' + ','.join('?' for _ in hits) + ')', [h[0] for h in hits])
         for row in rows:
             row['title'] = display_title(row.pop('description', ''))
+            analysis_status(row)
         mapping = {r['id']: r for r in rows}
         return {'items': [{**mapping[ident], 'score': score} for ident, score in hits if ident in mapping], 'total': len(hits)}
 
