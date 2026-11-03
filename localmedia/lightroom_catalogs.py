@@ -91,6 +91,7 @@ def edit_records(path, selected=None):
         records = {}
         columns = {r[1] for r in connection.execute('PRAGMA table_info(Adobe_images)')}
         fields = [f for f in ('rating', 'pick', 'colorLabels', 'orientation') if f in columns]
+        has_develop = connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='Adobe_imageDevelopSettings'").fetchone()
         images = connection.execute('SELECT id_local,id_global' + ''.join(',"' + f + '"' for f in fields) + ' FROM Adobe_images').fetchall()
         for row in images:
             ident, key = row[0], str(row[1]).lower()
@@ -99,6 +100,10 @@ def edit_records(path, selected=None):
             def normalized(values):
                 return tuple(float(v) if isinstance(v, (int, float)) else v for v in values)
             record = [normalized(row[2:])]
+            if has_develop:
+                # Selecting an older history step can change the current image
+                # without changing the history list. Verify the active settings too.
+                record.append(connection.execute('SELECT text FROM Adobe_imageDevelopSettings WHERE image=?', (ident,)).fetchall())
             for table in ('Adobe_libraryImageDevelopHistoryStep', 'Adobe_libraryImageDevelopSnapshot'):
                 names = {r[1] for r in connection.execute('PRAGMA table_info("' + table + '")')}
                 names = sorted(names - {'id_local', 'id_global', 'image', 'digest', 'snapshotID'})

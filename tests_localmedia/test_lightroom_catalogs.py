@@ -80,14 +80,16 @@ def test_failed_publication_restores_previous_catalog(tmp_path,monkeypatch):
 
 
 def test_native_merge_snapshot_ids_and_numeric_storage_do_not_hide_content_changes(tmp_path):
-    def catalog(name,number,snapshot_id,text):
+    def catalog(name,number,snapshot_id,text,current='exposure=1.25'):
         path=tmp_path/name
         c=sqlite3.connect(path)
         try:
             c.executescript('''CREATE TABLE Adobe_images(id_local,id_global,rating,pick,colorLabels,orientation);
                 INSERT INTO Adobe_images VALUES(1,'photo',5,0,'','AB');
                 CREATE TABLE Adobe_libraryImageDevelopHistoryStep(id_local,id_global,image,name,text,hasDevelopAdjustments);
-                CREATE TABLE Adobe_libraryImageDevelopSnapshot(id_local,id_global,image,snapshotID,name,text);''')
+                CREATE TABLE Adobe_libraryImageDevelopSnapshot(id_local,id_global,image,snapshotID,name,text);
+                CREATE TABLE Adobe_imageDevelopSettings(image,text);''')
+            c.execute('INSERT INTO Adobe_imageDevelopSettings VALUES(1,?)',(current,))
             c.execute('INSERT INTO Adobe_libraryImageDevelopHistoryStep VALUES(1,?,1,?,?,?)',(name,'Exposure','exposure=1.25',number))
             c.execute('INSERT INTO Adobe_libraryImageDevelopSnapshot VALUES(2,?,1,?,?,?)',(name,snapshot_id,'Snapshot',text))
             c.commit()
@@ -98,6 +100,8 @@ def test_native_merge_snapshot_ids_and_numeric_storage_do_not_hide_content_chang
     changed=catalog('c.lrcat',1.0,'new-id','exposure=0')
     assert edit_records(a)==edit_records(b)
     assert edit_records(a)!=edit_records(changed)
+    older_step=catalog('d.lrcat',1.0,'new-id','exposure=1.25',current='exposure=0')
+    assert edit_records(a)!=edit_records(older_step)
 
 
 @pytest.mark.parametrize('allow_all', [False, True])
