@@ -116,12 +116,38 @@ def test_export_without_selected_checkbox_requires_proven_all_public_catalog(tmp
     native.class_name=lambda window:'Edit' if window==1 else 'Button'
     native.text=lambda window:labels.get(window,'')
     native.user=SimpleNamespace(GetDlgCtrlID=lambda window:1148 if window==1 else 1 if window==2 else 100)
-    native.send=lambda window,message,*args:states.get(window,0) if message==0xF0 else 1
+    def send(window,message,*args):
+        if message==0xF0:return states.get(window,0)
+        if message==0xF5:states[window]=1-states[window]
+        return 1
+    native.send=send
     native.post=lambda *args:saved.append(args)
     if allow_all:
         native.export_selected(tmp_path/'output',allow_all=True)
         assert saved==[(2,0xF5)]
+        assert states=={3:0,4:0,5:0}
     else:
         with pytest.raises(RuntimeError,match='导出选项'):
             native.export_selected(tmp_path/'output')
         assert saved==[]
+
+
+def test_public_subset_export_excludes_original_files_and_all_preview_caches(tmp_path):
+    native=NativeCatalogs.__new__(NativeCatalogs)
+    labels={3:'仅导出选定照片',4:'导出负片文件',5:'构建/包括智能预览',6:'包括可用的预览'}
+    states={3:0,4:1,5:1,6:1}
+    saved=[]
+    native.menu=lambda *args:None
+    native.dialog=lambda *args:99
+    native.children=lambda window:[1,2,3,4,5,6]
+    native.class_name=lambda window:'Edit' if window==1 else 'Button'
+    native.text=lambda window:labels.get(window,'')
+    native.user=SimpleNamespace(GetDlgCtrlID=lambda window:1148 if window==1 else 1 if window==2 else 100)
+    def send(window,message,*args):
+        if message==0xF0:return states.get(window,0)
+        if message==0xF5:states[window]=1-states[window]
+        return 1
+    native.send=send
+    native.post=lambda *args:saved.append((args,dict(states)))
+    native.export_selected(tmp_path/'output')
+    assert saved==[((2,0xF5),{3:1,4:0,5:0,6:0})]
