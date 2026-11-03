@@ -37,11 +37,19 @@ class CatalogPair:
     executable: Path
     normal: Path
     alternate: Path
+    hidden_roots: tuple[Path, ...] = ()
 
     @classmethod
     def load(cls, path: Path):
         data = json.loads(path.read_text(encoding="utf-8-sig"))
-        pair = cls(*(Path(data[key]).resolve() for key in ("lightroom_executable", "normal_catalog", "alternate_catalog")))
+        full_key = 'full_catalog' if 'full_catalog' in data else 'alternate_catalog'
+        if 'full_catalog' in data and 'alternate_catalog' in data and Path(data['full_catalog']) != Path(data['alternate_catalog']):
+            raise ValueError('完整目录与旧版独立目录配置冲突，请使用同一目标。')
+        roots = tuple(Path(value).resolve() for value in data.get('hidden_roots', []))
+        if data.get('catalog_mode') == 'normal_full' and not roots:
+            raise ValueError('普通/完整目录模式必须配置隐藏范围。')
+        pair = cls(*(Path(data[key]).resolve() for key in ("lightroom_executable", "normal_catalog", full_key)),
+                   hidden_roots=roots if data.get('catalog_mode') == 'normal_full' else ())
         pair.validate()
         return pair
 
@@ -171,7 +179,7 @@ class WindowsLightroom:
         finally:
             self.kernel.CloseHandle(handle)
 
-    def close(self, catalog, timeout=35):
+    def close(self, catalog, timeout=35, on_wait=None):
         if catalog not in (self.pair.normal, self.pair.alternate):
             raise ValueError("只能关闭已配置的图库。")
         pids = self.pids()
@@ -186,8 +194,12 @@ class WindowsLightroom:
                 raise RuntimeError("无法唯一识别目标 LR 窗口。")
             if not self.user.PostMessageW(windows[0], 0x0010, 0, 0):
                 raise ctypes.WinError(ctypes.get_last_error())
-            if self.kernel.WaitForSingleObject(handle, int(timeout * 1000)) != 0:
-                raise RuntimeError("LR 正在等待保存、备份或退出确认；未强制关闭。")
+            deadline = time.monotonic() + timeout
+            while self.kernel.WaitForSingleObject(handle, 500) != 0:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("LR 正在等待保存、备份或退出确认；未强制关闭。")
+                if on_wait:
+                    on_wait()
         finally:
             self.kernel.CloseHandle(handle)
 
@@ -225,6 +237,8 @@ def switch_catalog(session, target: Path, before_open=lambda: None):
     """Injectable transition used by the CLI and by meaningful fault tests."""
     if target not in (session.pair.normal, session.pair.alternate):
         raise ValueError("目标图库未配置。")
+    if getattr(session.pair, 'hidden_roots', ()):
+        raise RuntimeError('普通/完整目录模式需要先同步编辑，请使用 LR 的隐藏/显示菜单。')
     started = time.perf_counter()
     current = session.current()
     if current == target:

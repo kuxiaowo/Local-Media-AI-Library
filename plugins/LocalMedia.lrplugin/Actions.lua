@@ -7,9 +7,14 @@ local function run(action)
     LrTasks.startAsyncTask(function()
         local ok, message = LrTasks.pcall(function()
             local bridge = dofile(LrPathUtils.child(_PLUGIN.path, "Bridge.lua"))
-            local client = bridge.new(dofile(LrPathUtils.child(_PLUGIN.path, "Config.lua")))
+            local config = dofile(LrPathUtils.child(_PLUGIN.path, "Config.lua"))
+            local client = bridge.new(config)
             if action == "normal" or action == "alternate" then
-                client.launch("--switch", action, true)
+                assert(config.catalogMode == "normal_full", "这是旧版独立目录配置；请先配置普通/完整目录，避免把独立目录误当成全部照片。")
+                if config.catalogMode == "normal_full" and action == "normal" and client.item.mode == "alternate" then
+                    client.prepareNormal()
+                end
+                client.launch("--switch", action, true, config.catalogMode == "normal_full")
                 return
             end
             client.start()

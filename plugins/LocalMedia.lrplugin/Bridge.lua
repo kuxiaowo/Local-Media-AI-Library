@@ -21,10 +21,35 @@ function M.new(config)
     local item = assert(config.catalogs[key], "当前图库未配置，请先运行 LocalMedia 的 setup.py。")
     assert(string.match(item.url, "^http://127%.0%.0%.1:%d+$"), "AI 服务必须使用本机地址。")
     local client = { catalog = catalog, item = item }
-    function client.launch(action, mode, detach)
+    function client.launch(action, mode, detach, prepared)
         local command = quote(config.python) .. " " .. quote(config.launcher) .. " --config " .. quote(config.config)
-            .. " " .. action .. " " .. (mode or item.mode) .. (detach and " --detach" or "")
+            .. " " .. action .. " " .. (mode or item.mode) .. (detach and " --detach" or "") .. (prepared and " --prepared" or "")
         assert(LrTasks.execute('"' .. command .. '"') == 0, "后台服务启动失败，请检查本地配置和 service.log。")
+    end
+    function client.prepareNormal()
+        local function normal(path)
+            return string.lower(string.gsub(path, "\\", "/")):gsub("/+$", "")
+        end
+        assert(config.hiddenRoots and #config.hiddenRoots > 0, "尚未配置隐藏范围。")
+        local selected = {}
+        for _, photo in ipairs(catalog:getAllPhotos()) do
+            local path, hidden = normal(photo:getRawMetadata("path")), false
+            for _, root in ipairs(config.hiddenRoots) do
+                root = normal(root)
+                if path == root or string.sub(path, 1, #root + 1) == root .. "/" then hidden = true; break end
+            end
+            if not hidden then selected[#selected + 1] = photo end
+        end
+        assert(#selected > 0, "普通目录没有照片，无法导出普通目录。")
+        catalog:setActiveSources({ catalog.kAllPhotos })
+        catalog:setViewFilter({})
+        -- Source changes are reflected on a later UI tick. Selecting immediately
+        -- can be overwritten by LR's own source-change selection update.
+        LrTasks.sleep(0.3)
+        catalog:setSelectedPhotos(selected[1], selected)
+        LrTasks.sleep(0.3)
+        assert(#catalog:getTargetPhotos() == #selected, "普通照片选择尚未完成，请稍后重试；没有导出目录。")
+        return #selected
     end
     function client.request(path, body)
         assert(LrApplication.activeCatalog():getPath() == catalog:getPath(), "图库已切换。")
