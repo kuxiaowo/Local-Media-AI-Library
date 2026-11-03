@@ -16,6 +16,25 @@ sys.path.insert(0, str(ROOT))
 from localmedia.lightroom import CatalogPair, WindowsLightroom, switch_catalog
 
 
+def perform_switch(path, config, pair, mode, prepared=False):
+    session = WindowsLightroom(pair)
+    if not pair.hidden_roots:
+        raise RuntimeError('旧配置只支持独立目录切换；请先初始化普通/完整目录模式。')
+    if pair.hidden_roots and not prepared:
+        if session.current() is None:
+            raise RuntimeError('请先在 LR 打开配置的普通目录或完整目录。')
+        from localmedia.lightroom_native import NativeCatalogs
+        labels = (('LocalMedia: 隐藏指定照片', 'LocalMedia: 隐藏独立图库') if mode == 'normal'
+                  else ('LocalMedia: 显示全部照片', 'LocalMedia: 显示独立图库'))
+        NativeCatalogs(session).menu(('图库', 'Library'), labels, plugin=True)
+        return {'ok': True, 'queued': True, 'seconds': 0.0, 'target': mode}
+    with session.exclusive():
+        if pair.hidden_roots:
+            from localmedia.lightroom_workflow import switch_normal_full
+            return switch_normal_full(session, getattr(pair, mode), config)
+        return switch_catalog(session, getattr(pair, mode))
+
+
 def ready(config, mode):
     item = config['ai'][mode]
     request = urllib.request.Request(f"http://127.0.0.1:{item['port']}/api/lightroom/health", headers={
@@ -67,10 +86,9 @@ def panel(path, config, pair):
         status.set('正在正常关闭并切换 Lightroom…')
         def work():
             try:
-                session = WindowsLightroom(pair)
-                with session.exclusive():
-                    result = switch_catalog(session, getattr(pair, mode))
-                text = ('普通图库已显示' if mode == 'normal' else '独立图库已显示') + f" · {result['seconds']:.1f} 秒"
+                result = perform_switch(path, config, pair, mode)
+                text = ('已交给 Lightroom 同步并切换，请等待 LR 完成。' if result.get('queued') else
+                        ('普通目录已显示' if mode == 'normal' else '完整目录已显示') + f" · {result['seconds']:.1f} 秒")
             except Exception as exc:
                 text = str(exc)
             def finish():
@@ -79,7 +97,7 @@ def panel(path, config, pair):
                     button.config(state='normal')
             app.after(0, finish)
         threading.Thread(target=work, daemon=True).start()
-    for title, mode in [('隐藏独立图库', 'normal'), ('显示独立图库', 'alternate')]:
+    for title, mode in [('隐藏指定照片（普通目录）', 'normal'), ('显示全部照片（完整目录）', 'alternate')]:
         button = ttk.Button(app, text=title, command=lambda m=mode: action(m))
         button.pack(fill='x', padx=32, pady=5)
         buttons.append(button)
@@ -95,6 +113,7 @@ def main():
     action.add_argument('--ai', choices=['normal', 'alternate'])
     action.add_argument('--switch', choices=['normal', 'alternate'])
     parser.add_argument('--detach', action='store_true')
+    parser.add_argument('--prepared', action='store_true', help=argparse.SUPPRESS)
     args = parser.parse_args()
     path = args.config.resolve()
     config = json.loads(path.read_text(encoding='utf-8-sig'))
@@ -103,7 +122,7 @@ def main():
         if not args.switch:
             parser.error('--detach requires --switch')
         subprocess.Popen([sys.executable, str(Path(__file__).resolve()), '--config', str(path),
-                          '--switch', args.switch], cwd=ROOT, creationflags=0x08000000)
+                          '--switch', args.switch, *(['--prepared'] if args.prepared else [])], cwd=ROOT, creationflags=0x08000000)
         return
     if args.serve:
         from localmedia.api import create_app
@@ -115,14 +134,15 @@ def main():
     elif args.switch:
         result = {'ok': False}
         try:
-            session = WindowsLightroom(pair)
-            with session.exclusive():
-                result = switch_catalog(session, getattr(pair, args.switch))
+            result = perform_switch(path, config, pair, args.switch, args.prepared)
         except Exception as exc:
             result['error'] = str(exc)
+        if not result.get('queued'):
+            result['target'] = args.switch
+            (path.parent / 'last-switch.json').write_text(json.dumps(result, ensure_ascii=False), encoding='utf-8')
+        if not result.get('ok'):
             import ctypes
-            ctypes.windll.user32.MessageBoxW(None, str(exc), 'LocalMedia 图库切换未完成', 0x10)
-        (path.parent / 'last-switch.json').write_text(json.dumps(result, ensure_ascii=False), encoding='utf-8')
+            ctypes.windll.user32.MessageBoxW(None, result['error'], 'LocalMedia 图库切换未完成', 0x10)
     else:
         panel(path, config, pair)
 
