@@ -215,7 +215,7 @@ class NativeCatalogs:
         self.send(edits[0], 0xC, 0, ctypes.cast(value, ctypes.c_void_p).value)
         self.post(buttons[0], 0xF5)
 
-    def export_selected(self, destination, allow_all=False):
+    def export_selected(self, destination, allow_all=False, include_previews=False):
         if destination.exists():
             raise ValueError('导出目标已存在，不会覆盖。')
         self.menu(('文件', 'File'), ('导出为目录', 'Export as Catalog'))
@@ -224,7 +224,7 @@ class NativeCatalogs:
         for labels, state in [(('仅导出选定照片', 'Export selected photos only'), 1),
                               (('导出负片文件', 'Export negative files'), 0),
                               (('构建/包括智能预览', 'Build / Include Smart Previews'), 0),
-                              (('包括可用的预览', 'Include available previews'), 1)]:
+                              (('包括可用的预览', 'Include available previews'), int(include_previews))]:
             found = [w for w in children if self.class_name(w) == 'Button' and self.text(w) in labels]
             if not found and allow_all and labels[0] == '仅导出选定照片':
                 # LR omits this control when the complete catalog is selected.
